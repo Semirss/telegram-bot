@@ -1,0 +1,19 @@
+# Session files
+user_session.session
+*.session
+
+# Data files
+forwarded_messages.json
+scraped_7d.parquet
+
+# Environment variables
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+pip-log.txt
