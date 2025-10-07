@@ -900,29 +900,35 @@ def clear_forwarded_history(update, context):
 # Main
 # ======================
 def main():
-    # === FREE FIX: Simple port binding for Render web services ===
+    # === PROPER HTTP HEALTH CHECK FOR RENDER ===
     import os
-    import socket
+    from http.server import HTTPServer, BaseHTTPRequestHandler
     from threading import Thread
     
-    def bind_port():
-        try:
-            port = int(os.environ.get('PORT', 10000))
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.bind(('0.0.0.0', port))
-                s.listen(1)
-                print(f"✅ Port {port} bound successfully for Render")
-                # Keep the socket open
-                while True:
-                    conn, addr = s.accept()
-                    conn.close()
-        except Exception as e:
-            print(f"⚠️ Port binding failed: {e}")
-
-    # Start port binding in background thread
-    port_thread = Thread(target=bind_port, daemon=True)
-    port_thread.start()
-    # === END FREE FIX ===
+    class HealthHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path == '/health':
+                self.send_response(200)
+                self.send_header('Content-type', 'text/plain')
+                self.end_headers()
+                self.wfile.write(b'OK')
+            else:
+                self.send_response(404)
+                self.end_headers()
+        
+        def log_message(self, format, *args):
+            pass  # Disable logging
+    
+    def start_health_server():
+        port = int(os.environ.get('PORT', 8080))
+        server = HTTPServer(('0.0.0.0', port), HealthHandler)
+        print(f"✅ Health check server running on port {port}")
+        server.serve_forever()
+    
+    # Start health server in background thread
+    health_thread = Thread(target=start_health_server, daemon=True)
+    health_thread.start()
+    # === END HEALTH CHECK ===
 
     # Your existing main code continues here...
     sync_session_files()
