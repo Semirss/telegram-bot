@@ -12,6 +12,14 @@ import threading
 import glob
 import re
 import pandas as pd
+import mimetypes
+from supabase import create_client, Client
+
+def what(file, h=None):
+    mime = mimetypes.guess_type(file)[0]
+    if mime and mime.startswith('image/'):
+        return mime.split('/')[-1]
+    return None
 
 # === 🔐 Load environment variables ===
 load_dotenv()
@@ -19,18 +27,89 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 MONGO_URI = os.getenv("MONGO_URI")
 API_ID = 24916488
 API_HASH = "3b7788498c56da1a02e904ff8e92d494"
-FORWARD_CHANNEL = os.getenv("FORWARD_CHANNEL")  # target channel username
-ADMIN_CODE = os.getenv("ADMIN_CODE")  # secret code for access
+FORWARD_CHANNEL = os.getenv("FORWARD_CHANNEL")
+ADMIN_CODE = os.getenv("ADMIN_CODE")
 
-# === 📁 Files ===
+# === 🔄 Supabase Setup ===
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+# === 📁 File Names ===
 FORWARDED_FILE = "forwarded_messages.json"
-USER_SESSION_FILE = "user_session.session"  # Main user session file
-scraped_7d = "scraped_7d.parquet" 
+USER_SESSION_FILE = "user_session.session"
+scraped_7d = "scraped_7d.parquet"
+
 # === ⚡ MongoDB Setup ===
 client = MongoClient(MONGO_URI)
 db = client["yetal"]
 channels_collection = db["yetalcollection"]
-auth_collection = db["authorized_users"]  # store authorized user IDs
+auth_collection = db["authorized_users"]
+
+# === 🔄 Supabase Storage Functions ===
+def download_from_supabase(bucket_name: str, file_path: str, local_path: str) -> bool:
+    """Download file from Supabase storage"""
+    try:
+        response = supabase.storage.from_(bucket_name).download(file_path)
+        if response:
+            with open(local_path, 'wb') as f:
+                f.write(response)
+            print(f"✅ Downloaded {file_path} from Supabase")
+            return True
+    except Exception as e:
+        print(f"❌ Error downloading {file_path} from Supabase: {e}")
+    return False
+
+def upload_to_supabase(bucket_name: str, file_path: str, local_path: str) -> bool:
+    """Upload file to Supabase storage"""
+    try:
+        if os.path.exists(local_path):
+            with open(local_path, 'rb') as f:
+                file_data = f.read()
+            
+            # Try to update existing file first
+            try:
+                response = supabase.storage.from_(bucket_name).update(file_path, file_data)
+            except:
+                # If update fails, try to create new file
+                response = supabase.storage.from_(bucket_name).upload(file_path, file_data)
+            
+            if response:
+                print(f"✅ Uploaded {file_path} to Supabase")
+                return True
+    except Exception as e:
+        print(f"❌ Error uploading {file_path} to Supabase: {e}")
+    return False
+
+def delete_from_supabase(bucket_name: str, file_path: str) -> bool:
+    """Delete file from Supabase storage"""
+    try:
+        response = supabase.storage.from_(bucket_name).remove([file_path])
+        print(f"✅ Deleted {file_path} from Supabase")
+        return True
+    except Exception as e:
+        print(f"❌ Error deleting {file_path} from Supabase: {e}")
+    return False
+
+def sync_session_files():
+    """Sync session files with Supabase on startup"""
+    print("🔄 Syncing session files with Supabase...")
+    
+    # Download user session if it exists in Supabase
+    download_from_supabase("sessions", USER_SESSION_FILE, USER_SESSION_FILE)
+    
+    # Download forwarded messages if they exist in Supabase
+    download_from_supabase("data", FORWARDED_FILE, FORWARDED_FILE)
+
+def save_forwarded_messages():
+    """Save forwarded messages to Supabase"""
+    if os.path.exists(FORWARDED_FILE):
+        upload_to_supabase("data", FORWARDED_FILE, FORWARDED_FILE)
+
+def save_user_session():
+    """Save user session to Supabase"""
+    if os.path.exists(USER_SESSION_FILE):
+        upload_to_supabase("sessions", USER_SESSION_FILE, USER_SESSION_FILE)
 
 # === 🧹 Text cleaning and extraction helpers ===
 def clean_text(text):
@@ -74,6 +153,7 @@ def extract_info(text, message_id):
         "channel_mention": channel_mention,
         "product_ref": str(message_id) 
     }
+
 # ======================
 # Wrapper for command authorization
 # ======================
@@ -86,24 +166,20 @@ def authorized(func):
             )
             return
         return func(update, context, *args, **kwargs)
-
     return wrapper
 
 def cleanup_telethon_sessions(channel_username=None):
     """Clean up Telethon session files for specific channels (not the main user session)"""
     try:
         if channel_username:
-            # Clean up specific channel session files
             session_pattern = f"session_{channel_username}.*"
             files = glob.glob(session_pattern)
             for file in files:
                 os.remove(file)
                 print(f"🧹 Deleted session file: {file}")
         else:
-            # Clean up all temporary session files except the main user session
             session_files = glob.glob("session_*.*")
             for file in session_files:
-                # Don't delete the main user session file
                 if file == USER_SESSION_FILE or file.startswith(USER_SESSION_FILE.replace('.session', '')):
                     continue
                 os.remove(file)
@@ -118,11 +194,8 @@ async def get_telethon_client():
     """Get the main Telethon client using the user session file"""
     try:
         client = TelegramClient(USER_SESSION_FILE, API_ID, API_HASH)
-        
-        # Connect the client first
         await client.connect()
         
-        # Check if authorized
         if not await client.is_user_authorized():
             print("🔐 User not authorized. Please check the session file or re-authenticate.")
             await client.disconnect()
@@ -131,7 +204,6 @@ async def get_telethon_client():
         return client
     except Exception as e:
         print(f"❌ Error creating Telethon client: {e}")
-        # Ensure client is disconnected if there's an error
         try:
             await client.disconnect()
         except:
@@ -146,14 +218,12 @@ async def forward_last_7d_async(channel_username: str):
     telethon_client = None
     
     try:
-        # Use the main user session client
         telethon_client = await get_telethon_client()
         if not telethon_client:
             return False, "❌ Failed to initialize Telethon client. Please check session."
         
         print(f"🔍 Checking if channel {channel_username} exists...")
         
-        # First, verify the channel exists and we can access it
         try:
             entity = await telethon_client.get_entity(channel_username)
             print(f"✅ Channel found: {entity.title}")
@@ -199,7 +269,6 @@ async def forward_last_7d_async(channel_username: str):
                 print(f"⏹️ Reached cutoff time at message {message_count}")
                 break
                 
-            # Check if message is already forwarded and has content
             if message.id not in forwarded_ids and (message.text or message.media):
                 messages_to_forward.append(message)
                 print(f"✅ Added message {message.id} from {message.date}")
@@ -210,17 +279,14 @@ async def forward_last_7d_async(channel_username: str):
             await telethon_client.disconnect()
             return False, f"📭 No new posts found in the last 7d from {channel_username}."
 
-        # Reverse to forward in chronological order
         messages_to_forward.reverse()
         total_forwarded = 0
         
         print(f"➡️ Forwarding {len(messages_to_forward)} messages from {channel_username}...")
         
-        # Forward in batches of 10 to avoid rate limits
         for i in range(0, len(messages_to_forward), 10):
             batch = messages_to_forward[i:i+10]
             try:
-                # Add timeout to avoid hanging forever
                 await asyncio.wait_for(
                     telethon_client.forward_messages(
                         entity=FORWARD_CHANNEL,
@@ -230,13 +296,12 @@ async def forward_last_7d_async(channel_username: str):
                     timeout=30
                 )
                 
-                # Update forwarded IDs
                 for msg in batch:
                     forwarded_ids[msg.id] = msg.date.replace(tzinfo=None)
                     total_forwarded += 1
                 
                 print(f"✅ Forwarded batch {i//10 + 1}/{(len(messages_to_forward)-1)//10 + 1} ({len(batch)} messages)")
-                await asyncio.sleep(1)  # Small delay between batches
+                await asyncio.sleep(1)
                 
             except ChatForwardsRestrictedError:
                 print(f"🚫 Forwarding restricted for channel {channel_username}, skipping...")
@@ -255,11 +320,13 @@ async def forward_last_7d_async(channel_username: str):
                 print(f"⚠️ Unexpected error forwarding from {channel_username}: {e}")
                 continue
 
-        # Save updated forwarded IDs
+        # Save updated forwarded IDs to local file and Supabase
         with open(FORWARDED_FILE, "w") as f:
             json.dump({str(k): v.strftime("%Y-%m-%d %H:%M:%S") for k, v in forwarded_ids.items()}, f)
+        
+        # Upload to Supabase
+        save_forwarded_messages()
 
-        # Disconnect the client
         await telethon_client.disconnect()
 
         if total_forwarded > 0:
@@ -269,7 +336,6 @@ async def forward_last_7d_async(channel_username: str):
 
     except Exception as e:
         print(f"❌ Critical error in forward_last_7d: {e}")
-        # Ensure client is disconnected even if there's an error
         try:
             if telethon_client:
                 await telethon_client.disconnect()
@@ -280,10 +346,8 @@ async def forward_last_7d_async(channel_username: str):
 def forward_last_7d_sync(channel_username: str):
     """Synchronous wrapper for the async forwarding function"""
     try:
-        # Create a new event loop for this operation
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        
         result = loop.run_until_complete(forward_last_7d_async(channel_username))
         loop.close()
         return result
@@ -305,9 +369,11 @@ def setup_session(update, context):
                     client = TelegramClient(USER_SESSION_FILE, API_ID, API_HASH)
                     await client.start()
                     
-                    # This will prompt for phone number and code on first run
                     me = await client.get_me()
                     result = f"✅ Session setup successful!\nLogged in as: {me.first_name} (@{me.username})"
+                    
+                    # Save session to Supabase after setup
+                    save_user_session()
                     
                     return result
                 except Exception as e:
@@ -356,7 +422,6 @@ def check_session(update, context):
                 except Exception as e:
                     return f"❌ Session check failed: {e}"
                 finally:
-                    # Always disconnect
                     if client:
                         await client.disconnect()
             
@@ -379,7 +444,7 @@ def check_session(update, context):
     threading.Thread(target=run_check, daemon=True).start()
 
 # ======================
-# /start command
+# Bot commands
 # ======================
 def start(update, context):
     user_id = update.effective_user.id
@@ -391,20 +456,18 @@ def start(update, context):
             "/listchannels\n"
             "/checkchannel @ChannelUsername\n"
             "/deletechannel @ChannelUsername\n"
-            "/setup_session - Set up Telegram session (first time)\n"
+            "/setup_session - Set up Telegram session\n"
             "/check_session - Check session status\n"
             "/test - Test connection\n"
             "/cleanup - Cleanup sessions\n"
-            "/clearhistory - Clear forwarded history"
+            "/clearhistory - Clear forwarded history\n"
+            "/sync_files - Sync files with Supabase"
         )
     else:
         update.message.reply_text(
             "⚡ Welcome! Please enter your access code using /code YOUR_CODE"
         )
 
-# ======================
-# /code command
-# ======================
 def code(update, context):
     user_id = update.effective_user.id
     if auth_collection.find_one({"user_id": user_id}):
@@ -424,20 +487,19 @@ def code(update, context):
         )
     else:
         update.message.reply_text("❌ Invalid code. Access denied.")
+
 # === 📊 7-day scraping function ===
 async def scrape_channel_7days_async(channel_username: str):
     """Scrape last 7 days of data from a channel and append to parquet file"""
     telethon_client = None
     
     try:
-        # Use the main user session client
         telethon_client = await get_telethon_client()
         if not telethon_client:
             return False, "❌ Failed to initialize Telethon client for scraping."
         
         print(f"🔍 Starting 7-day scrape for channel: {channel_username}")
         
-        # Verify the channel exists
         try:
             entity = await telethon_client.get_entity(channel_username)
             print(f"✅ Channel found: {entity.title}")
@@ -445,7 +507,6 @@ async def scrape_channel_7days_async(channel_username: str):
             await telethon_client.disconnect()
             return False, f"❌ Channel {channel_username} is invalid or doesn't exist."
         
-        # ✅ Resolve target channel (forwarded copies live here)
         try:
             target_entity = await telethon_client.get_entity(FORWARD_CHANNEL)
             print(f"✅ Target channel resolved: {target_entity.title}")
@@ -454,12 +515,10 @@ async def scrape_channel_7days_async(channel_username: str):
             await telethon_client.disconnect()
             return False, f"❌ Could not resolve target channel: {str(e)}"
         
-        # Calculate 7-day cutoff
         now = datetime.now(timezone.utc)
         cutoff = now - timedelta(days=7)
         print(f"⏰ Scraping messages from last 7 days (since {cutoff})")
         
-        # ✅ FIRST: Collect all message texts from source channel to search for in target channel
         source_messages = []
         print(f"📡 Collecting messages from source channel: {channel_username}")
         
@@ -479,7 +538,6 @@ async def scrape_channel_7days_async(channel_username: str):
         
         print(f"📋 Collected {len(source_messages)} messages from source channel")
         
-        # ✅ SECOND: Iterate through target channel and match messages
         scraped_data = []
         message_count = 0
         
@@ -498,13 +556,11 @@ async def scrape_channel_7days_async(channel_username: str):
             if not message.text:
                 continue
 
-            # ✅ Find matching message from source channel
             matching_source = None
             for source_msg in source_messages:
-                # Simple text matching - same logic as working version
                 if (source_msg['text'] in message.text or 
                     message.text in source_msg['text'] or
-                    source_msg['text'][:100] in message.text):  # Match first 100 chars
+                    source_msg['text'][:100] in message.text):
                     matching_source = source_msg
                     break
 
@@ -513,7 +569,6 @@ async def scrape_channel_7days_async(channel_username: str):
 
             info = extract_info(message.text, message.id)
             
-            # ✅ Build permalink from TARGET channel (where the message actually exists)
             if getattr(target_entity, "username", None):
                 post_link = f"https://t.me/{target_entity.username}/{message.id}"
             else:
@@ -522,7 +577,6 @@ async def scrape_channel_7days_async(channel_username: str):
                     internal_id = internal_id[4:]
                 post_link = f"https://t.me/c/{internal_id}/{message.id}"
 
-            # Create post data
             post_data = {
                 "title": info["title"],
                 "description": info["description"],
@@ -532,29 +586,22 @@ async def scrape_channel_7days_async(channel_username: str):
                 "date": message.date.strftime("%Y-%m-%d %H:%M:%S"),
                 "channel": channel_username,
                 "post_link": post_link,
-                "product_ref": str(message.id),  # Use the target channel message ID
+                "product_ref": str(message.id),
                 "scraped_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             }
             scraped_data.append(post_data)
         
         print(f"📋 Found {len(scraped_data)} matching messages in target channel")
         
-        # Load existing data and remove duplicates
         existing_df = pd.DataFrame()
         if os.path.exists(scraped_7d):
             existing_df = pd.read_parquet(scraped_7d, engine='pyarrow')
             print(f"📁 Loaded existing data with {len(existing_df)} records")
         
-        # Create new dataframe and remove duplicates
         new_df = pd.DataFrame(scraped_data)
         if not new_df.empty:
-            # Combine existing and new data, remove duplicates based on product_ref AND channel
             combined_df = pd.concat([existing_df, new_df], ignore_index=True)
-            
-            # Remove duplicates based on both product_ref and channel to avoid same message ID from different channels
             combined_df = combined_df.drop_duplicates(subset=['product_ref', 'channel'], keep='last')
-            
-            # Save updated data
             combined_df.to_parquet(scraped_7d, engine='pyarrow', index=False)
             print(f"💾 Saved {len(combined_df)} total records to {scraped_7d}")
             
@@ -570,17 +617,6 @@ async def scrape_channel_7days_async(channel_username: str):
         if telethon_client:
             await telethon_client.disconnect()
         return False, f"❌ Scraping error: {str(e)}"
-        
-def scrape_channel_7days_sync(channel_username: str):
-    """Synchronous wrapper for 7-day scraping"""
-    try:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        result = loop.run_until_complete(scrape_channel_7days_async(channel_username))
-        loop.close()
-        return result
-    except Exception as e:
-        return False, f"❌ Scraping error: {str(e)}"
 
 def scrape_channel_7days_sync(channel_username: str):
     """Synchronous wrapper for 7-day scraping"""
@@ -592,9 +628,7 @@ def scrape_channel_7days_sync(channel_username: str):
         return result
     except Exception as e:
         return False, f"❌ Scraping error: {str(e)}"
-# ======================
-# Bot commands
-# ======================
+
 @authorized
 def add_channel(update, context):
     if len(context.args) == 0:
@@ -622,7 +656,6 @@ def add_channel(update, context):
             parse_mode="HTML",
         )
 
-        # Start 7-day scraping in background
         update.message.reply_text(f"⏳ Starting 7-day data scraping from {username}...")
         
         def run_scraping():
@@ -641,10 +674,8 @@ def add_channel(update, context):
                     parse_mode="HTML"
                 )
 
-        # Start scraping in background thread
         threading.Thread(target=run_scraping, daemon=True).start()
 
-        # Also start forwarding in background (your existing forwarding code)
         update.message.reply_text(f"⏳ Forwarding last 7d posts from {username}...")
         
         def run_forwarding():
@@ -673,6 +704,7 @@ def add_channel(update, context):
         update.message.reply_text(
             f"❌ Unexpected error:\n<code>{str(e)}</code>", parse_mode="HTML"
         )
+
 @authorized
 def check_scraped_data(update, context):
     """Check the current scraped data statistics"""
@@ -761,6 +793,15 @@ def delete_channel(update, context):
         )
 
 @authorized
+def sync_files_command(update, context):
+    """Manually sync files with Supabase"""
+    try:
+        sync_session_files()
+        update.message.reply_text("✅ Files synced with Supabase!")
+    except Exception as e:
+        update.message.reply_text(f"❌ Error syncing files: {e}")
+
+@authorized
 def unknown_command(update, context):
     update.message.reply_text(
         "❌ Unknown command.\n\n"
@@ -772,7 +813,7 @@ def unknown_command(update, context):
         "/setup_session - Set up Telegram session\n"
         "/check_session - Check session status\n"
         "/test - Test connection\n"
-        
+        "/sync_files - Sync files with Supabase"
     )
 
 # ======================
@@ -824,7 +865,6 @@ def test_connection(update, context):
                 text=f"❌ Test failed: {e}"
             )
     
-    # Run test in background thread
     threading.Thread(target=run_test, daemon=True).start()
 
 # ======================
@@ -848,9 +888,11 @@ def clear_forwarded_history(update, context):
     try:
         if os.path.exists(FORWARDED_FILE):
             os.remove(FORWARDED_FILE)
-            update.message.reply_text("✅ Forwarded messages history cleared.")
+            delete_from_supabase("data", FORWARDED_FILE)
+            update.message.reply_text("✅ Forwarded messages history cleared from local and Supabase.")
         else:
-            update.message.reply_text("ℹ️ No forwarded messages history found.")
+            delete_from_supabase("data", FORWARDED_FILE)
+            update.message.reply_text("✅ Forwarded messages history cleared from Supabase.")
     except Exception as e:
         update.message.reply_text(f"❌ Error clearing history: {e}")
 
@@ -858,6 +900,9 @@ def clear_forwarded_history(update, context):
 # Main
 # ======================
 def main():
+    # Sync files on startup
+    sync_session_files()
+    
     updater = Updater(BOT_TOKEN, use_context=True)
     dp = updater.dispatcher
 
@@ -871,12 +916,13 @@ def main():
     dp.add_handler(CommandHandler("check_session", check_session))
     dp.add_handler(CommandHandler("test", test_connection))
     dp.add_handler(CommandHandler("check_data", check_scraped_data))
-   
+    dp.add_handler(CommandHandler("cleanup", cleanup_sessions))
+    dp.add_handler(CommandHandler("clearhistory", clear_forwarded_history))
+    dp.add_handler(CommandHandler("sync_files", sync_files_command))
     dp.add_handler(MessageHandler(Filters.command, unknown_command))
 
-    print("🤖 Bot is running...")
+    print("🤖 Bot is running with Supabase storage...")
     
-    # Check if session file exists on startup
     if os.path.exists(USER_SESSION_FILE):
         print("✅ User session file found.")
     else:
@@ -887,6 +933,9 @@ def main():
         updater.idle()
     except KeyboardInterrupt:
         print("\n🛑 Shutting down bot...")
+        # Save files before shutting down
+        save_user_session()
+        save_forwarded_messages()
     except Exception as e:
         print(f"❌ Bot error: {e}")
     finally:
