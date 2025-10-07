@@ -900,12 +900,37 @@ def clear_forwarded_history(update, context):
 # Main
 # ======================
 def main():
-    # Sync files on startup
+    # === FREE FIX: Simple port binding for Render web services ===
+    import os
+    import socket
+    from threading import Thread
+    
+    def bind_port():
+        try:
+            port = int(os.environ.get('PORT', 10000))
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.bind(('0.0.0.0', port))
+                s.listen(1)
+                print(f"✅ Port {port} bound successfully for Render")
+                # Keep the socket open
+                while True:
+                    conn, addr = s.accept()
+                    conn.close()
+        except Exception as e:
+            print(f"⚠️ Port binding failed: {e}")
+
+    # Start port binding in background thread
+    port_thread = Thread(target=bind_port, daemon=True)
+    port_thread.start()
+    # === END FREE FIX ===
+
+    # Your existing main code continues here...
     sync_session_files()
     
     updater = Updater(BOT_TOKEN, use_context=True)
     dp = updater.dispatcher
-
+    
+    # Add all your handlers
     dp.add_handler(CommandHandler("start", start))
     dp.add_handler(CommandHandler("code", code))
     dp.add_handler(CommandHandler("addchannel", add_channel))
