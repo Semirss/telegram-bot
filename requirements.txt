@@ -1,6 +1,7 @@
 telethon==1.28.5
 pymongo==4.5.0
-pandas==2.0.3
-pyarrow==13.0.0
+pandas==2.1.4
+pyarrow==14.0.1
 python-dotenv==1.0.0
 boto3==1.28.62
+python-telegram-bot==20.7
