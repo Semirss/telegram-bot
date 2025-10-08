@@ -15,6 +15,20 @@ import pandas as pd
 import platform
 import sqlite3
 from telethon.sessions import SQLiteSession
+from flask import Flask
+import threading
+
+app = Flask(__name__)
+
+@app.route("/")
+def home():
+    return "Bot is alive!"
+
+# Run Flask in a separate thread
+def run_flask():
+    app.run(host="0.0.0.0", port=5000)
+
+threading.Thread(target=run_flask, daemon=True).start()
 
 # === 🔐 Load environment variables ===
 load_dotenv()
