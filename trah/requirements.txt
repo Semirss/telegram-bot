@@ -4,6 +4,6 @@ pymongo==4.10.1
 pandas==2.2.3
 pyarrow==16.1.0
 python-dotenv==1.0.1
-urllib3<2.0
+urllib3==1.26.20
 six==1.16.0
 supabase==2.14.0
