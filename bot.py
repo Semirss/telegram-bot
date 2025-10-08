@@ -12,14 +12,9 @@ import threading
 import glob
 import re
 import pandas as pd
-import mimetypes
-from supabase import create_client, Client
-
-def what(file, h=None):
-    mime = mimetypes.guess_type(file)[0]
-    if mime and mime.startswith('image/'):
-        return mime.split('/')[-1]
-    return None
+import platform
+import sqlite3
+from telethon.sessions import SQLiteSession
 
 # === 🔐 Load environment variables ===
 load_dotenv()
@@ -27,89 +22,45 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 MONGO_URI = os.getenv("MONGO_URI")
 API_ID = 24916488
 API_HASH = "3b7788498c56da1a02e904ff8e92d494"
-FORWARD_CHANNEL = os.getenv("FORWARD_CHANNEL")
-ADMIN_CODE = os.getenv("ADMIN_CODE")
+FORWARD_CHANNEL = os.getenv("FORWARD_CHANNEL")  # target channel username
+ADMIN_CODE = os.getenv("ADMIN_CODE")  # secret code for access
 
-# === 🔄 Supabase Setup ===
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-
-# === 📁 File Names ===
+# === 📁 Files ===
 FORWARDED_FILE = "forwarded_messages.json"
-USER_SESSION_FILE = "user_session.session"
-scraped_7d = "scraped_7d.parquet"
+scraped_7d = "scraped_7d.parquet" 
+
+# === 🔧 Environment Detection ===
+def get_session_filename():
+    """Get unique session filename for each environment"""
+    # Detect if running on Render
+    if 'RENDER' in os.environ:
+        return "session_render.session"
+    
+    # Detect if running locally by computer name or other indicators
+    computer_name = platform.node().lower()
+    username = os.getenv('USER', '').lower()
+    
+    # Common local computer identifiers
+    local_indicators = ['desktop', 'laptop', 'pc', 'home', 'workstation', 'macbook']
+    
+    if any(indicator in computer_name for indicator in local_indicators):
+        return "session_local.session"
+    elif username and username not in ['render', 'root', 'admin']:  # Common local usernames
+        return "session_local.session"
+    elif os.name == 'nt':  # Windows
+        return "session_local.session"
+    else:
+        return "session_main.session"
+
+USER_SESSION_FILE = get_session_filename()
+print(f"🔧 Environment detected: Using session file - {USER_SESSION_FILE}")
 
 # === ⚡ MongoDB Setup ===
 client = MongoClient(MONGO_URI)
 db = client["yetal"]
 channels_collection = db["yetalcollection"]
-auth_collection = db["authorized_users"]
-
-# === 🔄 Supabase Storage Functions ===
-def download_from_supabase(bucket_name: str, file_path: str, local_path: str) -> bool:
-    """Download file from Supabase storage"""
-    try:
-        response = supabase.storage.from_(bucket_name).download(file_path)
-        if response:
-            with open(local_path, 'wb') as f:
-                f.write(response)
-            print(f"✅ Downloaded {file_path} from Supabase")
-            return True
-    except Exception as e:
-        print(f"❌ Error downloading {file_path} from Supabase: {e}")
-    return False
-
-def upload_to_supabase(bucket_name: str, file_path: str, local_path: str) -> bool:
-    """Upload file to Supabase storage"""
-    try:
-        if os.path.exists(local_path):
-            with open(local_path, 'rb') as f:
-                file_data = f.read()
-            
-            # Try to update existing file first
-            try:
-                response = supabase.storage.from_(bucket_name).update(file_path, file_data)
-            except:
-                # If update fails, try to create new file
-                response = supabase.storage.from_(bucket_name).upload(file_path, file_data)
-            
-            if response:
-                print(f"✅ Uploaded {file_path} to Supabase")
-                return True
-    except Exception as e:
-        print(f"❌ Error uploading {file_path} to Supabase: {e}")
-    return False
-
-def delete_from_supabase(bucket_name: str, file_path: str) -> bool:
-    """Delete file from Supabase storage"""
-    try:
-        response = supabase.storage.from_(bucket_name).remove([file_path])
-        print(f"✅ Deleted {file_path} from Supabase")
-        return True
-    except Exception as e:
-        print(f"❌ Error deleting {file_path} from Supabase: {e}")
-    return False
-
-def sync_session_files():
-    """Sync session files with Supabase on startup"""
-    print("🔄 Syncing session files with Supabase...")
-    
-    # Download user session if it exists in Supabase
-    download_from_supabase("sessions", USER_SESSION_FILE, USER_SESSION_FILE)
-    
-    # Download forwarded messages if they exist in Supabase
-    download_from_supabase("data", FORWARDED_FILE, FORWARDED_FILE)
-
-def save_forwarded_messages():
-    """Save forwarded messages to Supabase"""
-    if os.path.exists(FORWARDED_FILE):
-        upload_to_supabase("data", FORWARDED_FILE, FORWARDED_FILE)
-
-def save_user_session():
-    """Save user session to Supabase"""
-    if os.path.exists(USER_SESSION_FILE):
-        upload_to_supabase("sessions", USER_SESSION_FILE, USER_SESSION_FILE)
+auth_collection = db["authorized_users"]  # store authorized user IDs
+session_usage_collection = db["session_usage"]  # track session usage
 
 # === 🧹 Text cleaning and extraction helpers ===
 def clean_text(text):
@@ -168,6 +119,74 @@ def authorized(func):
         return func(update, context, *args, **kwargs)
     return wrapper
 
+# ======================
+# Session Usage Tracking
+# ======================
+def track_session_usage(operation: str, success: bool, error_msg: str = ""):
+    """Track session usage for monitoring"""
+    try:
+        session_usage_collection.insert_one({
+            "timestamp": datetime.now(),
+            "session_file": USER_SESSION_FILE,
+            "environment": "render" if 'RENDER' in os.environ else "local",
+            "operation": operation,
+            "success": success,
+            "error_message": error_msg,
+            "computer_name": platform.node()
+        })
+    except Exception as e:
+        print(f"⚠️ Could not track session usage: {e}")
+
+def get_session_usage_stats():
+    """Get session usage statistics"""
+    try:
+        # Last 24 hours stats
+        day_ago = datetime.now() - timedelta(hours=24)
+        
+        total_operations = session_usage_collection.count_documents({
+            "timestamp": {"$gte": day_ago}
+        })
+        
+        successful_operations = session_usage_collection.count_documents({
+            "timestamp": {"$gte": day_ago},
+            "success": True
+        })
+        
+        failed_operations = session_usage_collection.count_documents({
+            "timestamp": {"$gte": day_ago},
+            "success": False
+        })
+        
+        # Recent errors
+        recent_errors = list(session_usage_collection.find({
+            "timestamp": {"$gte": day_ago},
+            "success": False
+        }).sort("timestamp", -1).limit(5))
+        
+        # Environment usage
+        env_usage = session_usage_collection.aggregate([
+            {"$match": {"timestamp": {"$gte": day_ago}}},
+            {"$group": {"_id": "$environment", "count": {"$sum": 1}}}
+        ])
+        env_usage = {item["_id"]: item["count"] for item in env_usage}
+        
+        return {
+            "total_operations": total_operations,
+            "successful_operations": successful_operations,
+            "failed_operations": failed_operations,
+            "success_rate": (successful_operations / total_operations * 100) if total_operations > 0 else 0,
+            "recent_errors": recent_errors,
+            "environment_usage": env_usage,
+            "current_session": USER_SESSION_FILE,
+            "current_environment": "render" if 'RENDER' in os.environ else "local"
+        }
+    except Exception as e:
+        print(f"❌ Error getting session stats: {e}")
+        return None
+
+# ======================
+# Session Management
+# ======================
 def cleanup_telethon_sessions(channel_username=None):
     """Clean up Telethon session files for specific channels (not the main user session)"""
     try:
@@ -187,28 +206,88 @@ def cleanup_telethon_sessions(channel_username=None):
     except Exception as e:
         print(f"❌ Error cleaning up session files: {e}")
 
-# ======================
-# Get or create main Telethon client with user session
-# ======================
 async def get_telethon_client():
-    """Get the main Telethon client using the user session file"""
-    try:
-        client = TelegramClient(USER_SESSION_FILE, API_ID, API_HASH)
-        await client.connect()
-        
-        if not await client.is_user_authorized():
-            print("🔐 User not authorized. Please check the session file or re-authenticate.")
-            await client.disconnect()
-            return None
-            
-        return client
-    except Exception as e:
-        print(f"❌ Error creating Telethon client: {e}")
+    """Get the main Telethon client with robust error handling and retry logic"""
+    client = None
+    max_retries = 3
+    retry_delay = 2
+    
+    for attempt in range(max_retries):
         try:
-            await client.disconnect()
-        except:
-            pass
-        return None
+            print(f"🔧 Attempt {attempt + 1}/{max_retries} to connect Telethon client...")
+            
+            # Create session with explicit handling
+            session = SQLiteSession(USER_SESSION_FILE)
+            client = TelegramClient(session, API_ID, API_HASH)
+            
+            # Connect with timeout
+            await asyncio.wait_for(client.connect(), timeout=15)
+            
+            # Check if authorized
+            if not await client.is_user_authorized():
+                error_msg = "Session not authorized"
+                print(f"❌ {error_msg}")
+                track_session_usage("connection", False, error_msg)
+                await client.disconnect()
+                return None
+            
+            # Verify connection by getting user info
+            me = await asyncio.wait_for(client.get_me(), timeout=10)
+            print(f"✅ Telethon connected successfully as: {me.first_name} (@{me.username})")
+            track_session_usage("connection", True)
+            return client
+            
+        except (sqlite3.OperationalError, sqlite3.DatabaseError) as e:
+            error_msg = f"Database locked/error (attempt {attempt + 1})"
+            print(f"🔄 {error_msg}: {e}")
+            track_session_usage("connection", False, error_msg)
+            
+            if client:
+                try:
+                    await client.disconnect()
+                except:
+                    pass
+            
+            if attempt < max_retries - 1:
+                print(f"⏳ Retrying in {retry_delay} seconds...")
+                await asyncio.sleep(retry_delay)
+            else:
+                print("❌ Max retries reached for database connection")
+                return None
+                
+        except asyncio.TimeoutError:
+            error_msg = f"Connection timeout (attempt {attempt + 1})"
+            print(f"⏰ {error_msg}")
+            track_session_usage("connection", False, error_msg)
+            
+            if client:
+                try:
+                    await client.disconnect()
+                except:
+                    pass
+            
+            if attempt < max_retries - 1:
+                await asyncio.sleep(retry_delay)
+            else:
+                return None
+                
+        except Exception as e:
+            error_msg = f"Unexpected error: {str(e)}"
+            print(f"❌ {error_msg}")
+            track_session_usage("connection", False, error_msg)
+            
+            if client:
+                try:
+                    await client.disconnect()
+                except:
+                    pass
+            
+            if attempt < max_retries - 1:
+                await asyncio.sleep(retry_delay)
+            else:
+                return None
+    
+    return None
 
 # ======================
 # Forward last 7d posts from a given channel with duplicate prevention
@@ -218,27 +297,46 @@ async def forward_last_7d_async(channel_username: str):
     telethon_client = None
     
     try:
+        # Use the main user session client
         telethon_client = await get_telethon_client()
         if not telethon_client:
-            return False, "❌ Failed to initialize Telethon client. Please check session."
+            error_msg = "Failed to initialize Telethon client after retries"
+            track_session_usage("forwarding", False, error_msg)
+            return False, "❌ Could not establish connection. Please try again or check /checksessionusage."
         
         print(f"🔍 Checking if channel {channel_username} exists...")
         
         try:
-            entity = await telethon_client.get_entity(channel_username)
+            entity = await asyncio.wait_for(
+                telethon_client.get_entity(channel_username), 
+                timeout=15
+            )
             print(f"✅ Channel found: {entity.title}")
         except (ChannelInvalidError, UsernameInvalidError, UsernameNotOccupiedError) as e:
-            print(f"❌ Channel error: {e}")
-            await telethon_client.disconnect()
+            error_msg = f"Invalid channel: {str(e)}"
+            track_session_usage("forwarding", False, error_msg)
             return False, f"❌ Channel {channel_username} is invalid or doesn't exist."
+        except asyncio.TimeoutError:
+            error_msg = "Timeout accessing channel"
+            track_session_usage("forwarding", False, error_msg)
+            return False, f"❌ Timeout accessing channel {channel_username}"
         except Exception as e:
-            print(f"❌ Unexpected error getting entity: {e}")
-            await telethon_client.disconnect()
+            error_msg = f"Error accessing channel: {str(e)}"
+            track_session_usage("forwarding", False, error_msg)
             return False, f"❌ Error accessing channel: {str(e)}"
+
+        # Verify target channel
+        try:
+            target_entity = await telethon_client.get_entity(FORWARD_CHANNEL)
+            print(f"✅ Target channel: {target_entity.title}")
+        except Exception as e:
+            error_msg = f"Cannot access target channel: {str(e)}"
+            track_session_usage("forwarding", False, error_msg)
+            return False, f"❌ Cannot access target channel: {str(e)}"
 
         now = datetime.now(timezone.utc)
         cutoff = now - timedelta(days=7)
-        print(f"⏰ Cutoff time: {cutoff}")
+        print(f"⏰ Forwarding messages since: {cutoff}")
 
         # Load previously forwarded messages with timestamps
         if os.path.exists(FORWARDED_FILE):
@@ -260,33 +358,42 @@ async def forward_last_7d_async(channel_username: str):
         message_count = 0
         
         print(f"📨 Fetching messages from {channel_username}...")
-        async for message in telethon_client.iter_messages(channel_username, limit=200):
-            message_count += 1
-            if message_count % 10 == 0:
-                print(f"📊 Processed {message_count} messages...")
-                
-            if message.date < cutoff:
-                print(f"⏹️ Reached cutoff time at message {message_count}")
-                break
-                
-            if message.id not in forwarded_ids and (message.text or message.media):
-                messages_to_forward.append(message)
-                print(f"✅ Added message {message.id} from {message.date}")
+        
+        try:
+            async for message in telethon_client.iter_messages(entity, limit=200):
+                message_count += 1
+                if message_count % 10 == 0:
+                    print(f"📊 Processed {message_count} messages...")
+                    
+                if message.date < cutoff:
+                    print(f"⏹️ Reached cutoff time at message {message_count}")
+                    break
+                    
+                # Check if message is already forwarded and has content
+                if message.id not in forwarded_ids and (message.text or message.media):
+                    messages_to_forward.append(message)
+                    print(f"✅ Added message {message.id} from {message.date}")
+
+        except Exception as e:
+            print(f"⚠️ Error fetching messages: {e}")
 
         print(f"📋 Found {len(messages_to_forward)} new messages to forward")
 
         if not messages_to_forward:
-            await telethon_client.disconnect()
+            track_session_usage("forwarding", True, "No new messages to forward")
             return False, f"📭 No new posts found in the last 7d from {channel_username}."
 
+        # Reverse to forward in chronological order
         messages_to_forward.reverse()
         total_forwarded = 0
         
         print(f"➡️ Forwarding {len(messages_to_forward)} messages from {channel_username}...")
         
+        # Forward in batches of 10 to avoid rate limits
         for i in range(0, len(messages_to_forward), 10):
             batch = messages_to_forward[i:i+10]
             try:
+                # Add timeout to avoid hanging forever
                 await asyncio.wait_for(
                     telethon_client.forward_messages(
                         entity=FORWARD_CHANNEL,
@@ -296,12 +403,13 @@ async def forward_last_7d_async(channel_username: str):
                     timeout=30
                 )
                 
+                # Update forwarded IDs
                 for msg in batch:
                     forwarded_ids[msg.id] = msg.date.replace(tzinfo=None)
                     total_forwarded += 1
                 
                 print(f"✅ Forwarded batch {i//10 + 1}/{(len(messages_to_forward)-1)//10 + 1} ({len(batch)} messages)")
-                await asyncio.sleep(1)
+                await asyncio.sleep(1)  # Small delay between batches
                 
             except ChatForwardsRestrictedError:
                 print(f"🚫 Forwarding restricted for channel {channel_username}, skipping...")
@@ -320,39 +428,42 @@ async def forward_last_7d_async(channel_username: str):
                 print(f"⚠️ Unexpected error forwarding from {channel_username}: {e}")
                 continue
 
-        # Save updated forwarded IDs to local file and Supabase
+        # Save updated forwarded IDs
         with open(FORWARDED_FILE, "w") as f:
             json.dump({str(k): v.strftime("%Y-%m-%d %H:%M:%S") for k, v in forwarded_ids.items()}, f)
-        
-        # Upload to Supabase
-        save_forwarded_messages()
-
-        await telethon_client.disconnect()
 
         if total_forwarded > 0:
+            track_session_usage("forwarding", True, f"Forwarded {total_forwarded} messages")
             return True, f"✅ Successfully forwarded {total_forwarded} new posts from {channel_username}."
         else:
+            track_session_usage("forwarding", False, "No messages forwarded")
             return False, f"📭 No new posts to forward from {channel_username}."
 
     except Exception as e:
-        print(f"❌ Critical error in forward_last_7d: {e}")
-        try:
-            if telethon_client:
-                await telethon_client.disconnect()
-        except:
-            pass
+        error_msg = f"Critical error: {str(e)}"
+        print(f"❌ {error_msg}")
+        track_session_usage("forwarding", False, error_msg)
         return False, f"❌ Critical error: {str(e)}"
+    finally:
+        # Ensure client is disconnected even if there's an error
+        if telethon_client:
+            try:
+                await telethon_client.disconnect()
+            except:
+                pass
 
 def forward_last_7d_sync(channel_username: str):
     """Synchronous wrapper for the async forwarding function"""
     try:
+        # Create a new event loop for this operation
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
+        
         result = loop.run_until_complete(forward_last_7d_async(channel_username))
         loop.close()
         return result
     except Exception as e:
-        print(f"❌ Error in forward_last_7d_sync: {e}")
+        track_session_usage("forwarding", False, f"Sync error: {str(e)}")
         return False, f"❌ Error: {str(e)}"
 
 # ======================
@@ -369,15 +480,15 @@ def setup_session(update, context):
                     client = TelegramClient(USER_SESSION_FILE, API_ID, API_HASH)
                     await client.start()
                     
+                    # This will prompt for phone number and code on first run
                     me = await client.get_me()
-                    result = f"✅ Session setup successful!\nLogged in as: {me.first_name} (@{me.username})"
-                    
-                    # Save session to Supabase after setup
-                    save_user_session()
-                    
+                    result = f"✅ Session setup successful!\nLogged in as: {me.first_name} (@{me.username})\n\nSession file: {USER_SESSION_FILE}"
+                    track_session_usage("setup", True)
                     return result
                 except Exception as e:
-                    return f"❌ Session setup failed: {e}"
+                    error_msg = f"Session setup failed: {e}"
+                    track_session_usage("setup", False, error_msg)
+                    return f"❌ {error_msg}"
                 finally:
                     if client:
                         await client.disconnect()
@@ -387,16 +498,10 @@ def setup_session(update, context):
             result = loop.run_until_complete(setup_async())
             loop.close()
             
-            context.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text=result
-            )
+            context.bot.send_message(update.effective_chat.id, text=result)
             
         except Exception as e:
-            context.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text=f"❌ Session setup error: {e}"
-            )
+            context.bot.send_message(update.effective_chat.id, text=f"❌ Session setup error: {e}")
     
     update.message.reply_text("🔐 Starting session setup... This may require phone number verification.")
     threading.Thread(target=run_session_setup, daemon=True).start()
@@ -409,18 +514,18 @@ def check_session(update, context):
             async def check_async():
                 client = None
                 try:
-                    client = TelegramClient(USER_SESSION_FILE, API_ID, API_HASH)
-                    await client.connect()
-                    
-                    if not await client.is_user_authorized():
-                        return "❌ Session not authorized. Please run /setup_session first."
+                    client = await get_telethon_client()
+                    if not client:
+                        return "❌ Session connection failed. Check /checksessionusage for details."
                     
                     me = await client.get_me()
-                    result = f"✅ Session is valid!\nLogged in as: {me.first_name} (@{me.username})"
-                    
+                    result = f"✅ Session is valid!\nLogged in as: {me.first_name} (@{me.username})\n\nSession file: {USER_SESSION_FILE}"
+                    track_session_usage("check", True)
                     return result
                 except Exception as e:
-                    return f"❌ Session check failed: {e}"
+                    error_msg = f"Session check failed: {e}"
+                    track_session_usage("check", False, error_msg)
+                    return f"❌ {error_msg}"
                 finally:
                     if client:
                         await client.disconnect()
@@ -430,21 +535,64 @@ def check_session(update, context):
             result = loop.run_until_complete(check_async())
             loop.close()
             
-            context.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text=result
-            )
+            context.bot.send_message(update.effective_chat.id, text=result)
             
         except Exception as e:
-            context.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text=f"❌ Session check error: {e}"
-            )
+            context.bot.send_message(update.effective_chat.id, text=f"❌ Session check error: {e}")
     
     threading.Thread(target=run_check, daemon=True).start()
 
+@authorized
+def check_session_usage(update, context):
+    """Check session usage statistics and health"""
+    try:
+        stats = get_session_usage_stats()
+        if not stats:
+            update.message.reply_text("❌ Could not retrieve session usage statistics.")
+            return
+        
+        msg = f"📊 <b>Session Usage Statistics (Last 24h)</b>\n\n"
+        msg += f"🔧 <b>Current Session:</b> {stats['current_session']}\n"
+        msg += f"🌍 <b>Environment:</b> {stats['current_environment']}\n"
+        msg += f"💻 <b>Computer:</b> {platform.node()}\n\n"
+        
+        msg += f"📈 <b>Operations Summary:</b>\n"
+        msg += f"• Total Operations: {stats['total_operations']}\n"
+        msg += f"• Successful: {stats['successful_operations']}\n"
+        msg += f"• Failed: {stats['failed_operations']}\n"
+        msg += f"• Success Rate: {stats['success_rate']:.1f}%\n\n"
+        
+        msg += f"🌍 <b>Environment Usage:</b>\n"
+        for env, count in stats['environment_usage'].items():
+            msg += f"• {env}: {count} operations\n"
+        
+        if stats['recent_errors']:
+            msg += f"\n⚠️ <b>Recent Errors (last 5):</b>\n"
+            for error in stats['recent_errors']:
+                timestamp = error['timestamp'].strftime("%H:%M:%S")
+                operation = error['operation']
+                error_msg = error['error_message'][:50] + "..." if len(error['error_message']) > 50 else error['error_message']
+                msg += f"• {timestamp} - {operation}: {error_msg}\n"
+        
+        # Add health status
+        if stats['success_rate'] >= 90:
+            health = "🟢 Excellent"
+        elif stats['success_rate'] >= 75:
+            health = "🟡 Good"
+        elif stats['success_rate'] >= 50:
+            health = "🟠 Fair"
+        else:
+            health = "🔴 Poor"
+            
+        msg += f"\n❤️ <b>Health Status:</b> {health}"
+        
+        update.message.reply_text(msg, parse_mode="HTML")
+        
+    except Exception as e:
+        update.message.reply_text(f"❌ Error checking session usage: {e}")
+
 # ======================
-# Bot commands
+# /start command
 # ======================
 def start(update, context):
     user_id = update.effective_user.id
@@ -456,18 +604,21 @@ def start(update, context):
             "/listchannels\n"
             "/checkchannel @ChannelUsername\n"
             "/deletechannel @ChannelUsername\n"
-            "/setup_session - Set up Telegram session\n"
+            "/setup_session - Set up Telegram session (first time)\n"
             "/check_session - Check session status\n"
+            "/checksessionusage - Session usage statistics\n"
             "/test - Test connection\n"
             "/cleanup - Cleanup sessions\n"
-            "/clearhistory - Clear forwarded history\n"
-            "/sync_files - Sync files with Supabase"
+            "/clearhistory - Clear forwarded history"
         )
     else:
         update.message.reply_text(
             "⚡ Welcome! Please enter your access code using /code YOUR_CODE"
         )
 
+# ======================
+# /code command
+# ======================
 def code(update, context):
     user_id = update.effective_user.id
     if auth_collection.find_one({"user_id": user_id}):
@@ -496,7 +647,8 @@ async def scrape_channel_7days_async(channel_username: str):
     try:
         telethon_client = await get_telethon_client()
         if not telethon_client:
-            return False, "❌ Failed to initialize Telethon client for scraping."
+            track_session_usage("scraping", False, "Failed to initialize client")
+            return False, "❌ Could not establish connection for scraping."
         
         print(f"🔍 Starting 7-day scrape for channel: {channel_username}")
         
@@ -504,15 +656,14 @@ async def scrape_channel_7days_async(channel_username: str):
             entity = await telethon_client.get_entity(channel_username)
             print(f"✅ Channel found: {entity.title}")
         except (ChannelInvalidError, UsernameInvalidError, UsernameNotOccupiedError) as e:
-            await telethon_client.disconnect()
+            track_session_usage("scraping", False, f"Invalid channel: {str(e)}")
             return False, f"❌ Channel {channel_username} is invalid or doesn't exist."
         
         try:
             target_entity = await telethon_client.get_entity(FORWARD_CHANNEL)
             print(f"✅ Target channel resolved: {target_entity.title}")
         except Exception as e:
-            print(f"❌ Could not resolve target channel {FORWARD_CHANNEL}: {e}")
-            await telethon_client.disconnect()
+            track_session_usage("scraping", False, f"Target channel error: {str(e)}")
             return False, f"❌ Could not resolve target channel: {str(e)}"
         
         now = datetime.now(timezone.utc)
@@ -525,10 +676,8 @@ async def scrape_channel_7days_async(channel_username: str):
         async for message in telethon_client.iter_messages(entity, limit=None):
             if not message.text:
                 continue
-                
             if message.date < cutoff:
                 break
-                
             source_messages.append({
                 'text': message.text,
                 'date': message.date,
@@ -545,14 +694,11 @@ async def scrape_channel_7days_async(channel_username: str):
         
         async for message in telethon_client.iter_messages(target_entity, limit=None):
             message_count += 1
-            
             if message_count % 50 == 0:
                 print(f"📊 Processed {message_count} messages in target channel...")
-                
             if message.date < cutoff:
                 print(f"⏹️ Reached 7-day cutoff at message {message_count}")
                 break
-                
             if not message.text:
                 continue
 
@@ -606,17 +752,22 @@ async def scrape_channel_7days_async(channel_username: str):
             print(f"💾 Saved {len(combined_df)} total records to {scraped_7d}")
             
             new_count = len(combined_df) - len(existing_df)
-            await telethon_client.disconnect()
+            track_session_usage("scraping", True, f"Scraped {len(scraped_data)} messages")
             return True, f"✅ Scraped {len(scraped_data)} messages from {channel_username}. Added {new_count} new records to database."
         else:
-            await telethon_client.disconnect()
+            track_session_usage("scraping", True, "No new messages found")
             return False, f"📭 No matching messages found in target channel for {channel_username} in the last 7 days."
             
     except Exception as e:
-        print(f"❌ Error in 7-day scraping: {e}")
-        if telethon_client:
-            await telethon_client.disconnect()
+        error_msg = f"Scraping error: {str(e)}"
+        track_session_usage("scraping", False, error_msg)
         return False, f"❌ Scraping error: {str(e)}"
+    finally:
+        if telethon_client:
+            try:
+                await telethon_client.disconnect()
+            except:
+                pass
 
 def scrape_channel_7days_sync(channel_username: str):
     """Synchronous wrapper for 7-day scraping"""
@@ -627,8 +778,12 @@ def scrape_channel_7days_sync(channel_username: str):
         loop.close()
         return result
     except Exception as e:
+        track_session_usage("scraping", False, f"Sync error: {str(e)}")
         return False, f"❌ Scraping error: {str(e)}"
 
+# ======================
+# Bot commands
+# ======================
 @authorized
 def add_channel(update, context):
     if len(context.args) == 0:
@@ -637,9 +792,7 @@ def add_channel(update, context):
 
     username = context.args[0].strip()
     if not username.startswith("@"):
-        update.message.reply_text(
-            "❌ Please provide a valid channel username starting with @"
-        )
+        update.message.reply_text("❌ Please provide a valid channel username starting with @")
         return
 
     if channels_collection.find_one({"username": username}):
@@ -656,54 +809,31 @@ def add_channel(update, context):
             parse_mode="HTML",
         )
 
-        update.message.reply_text(f"⏳ Starting 7-day data scraping from {username}...")
-        
-        def run_scraping():
+        # Run operations sequentially
+        def run_operations():
             try:
+                # First scraping
+                update.message.reply_text(f"⏳ Starting 7-day data scraping from {username}...")
                 success, result_msg = scrape_channel_7days_sync(username)
-                context.bot.send_message(
-                    chat_id=update.effective_chat.id,
-                    text=result_msg,
-                    parse_mode="HTML"
-                )
-            except Exception as e:
-                error_msg = f"❌ Error during scraping: {str(e)}"
-                context.bot.send_message(
-                    chat_id=update.effective_chat.id,
-                    text=error_msg,
-                    parse_mode="HTML"
-                )
-
-        threading.Thread(target=run_scraping, daemon=True).start()
-
-        update.message.reply_text(f"⏳ Forwarding last 7d posts from {username}...")
-        
-        def run_forwarding():
-            try:
+                context.bot.send_message(update.effective_chat.id, text=result_msg, parse_mode="HTML")
+                
+                # Then forwarding with delay
+                import time
+                time.sleep(2)
+                update.message.reply_text(f"⏳ Forwarding last 7d posts from {username}...")
                 success, result_msg = forward_last_7d_sync(username)
-                context.bot.send_message(
-                    chat_id=update.effective_chat.id,
-                    text=result_msg,
-                    parse_mode="HTML"
-                )
+                context.bot.send_message(update.effective_chat.id, text=result_msg, parse_mode="HTML")
+                
             except Exception as e:
-                error_msg = f"❌ Error during forwarding: {str(e)}"
-                context.bot.send_message(
-                    chat_id=update.effective_chat.id,
-                    text=error_msg,
-                    parse_mode="HTML"
-                )
+                error_msg = f"❌ Error during operations: {str(e)}"
+                context.bot.send_message(update.effective_chat.id, text=error_msg, parse_mode="HTML")
 
-        threading.Thread(target=run_forwarding, daemon=True).start()
+        threading.Thread(target=run_operations, daemon=True).start()
 
     except BadRequest as e:
-        update.message.reply_text(
-            f"❌ Could not add channel:\n<code>{str(e)}</code>", parse_mode="HTML"
-        )
+        update.message.reply_text(f"❌ Could not add channel: {str(e)}")
     except Exception as e:
-        update.message.reply_text(
-            f"❌ Unexpected error:\n<code>{str(e)}</code>", parse_mode="HTML"
-        )
+        update.message.reply_text(f"❌ Unexpected error: {str(e)}")
 
 @authorized
 def check_scraped_data(update, context):
@@ -751,9 +881,7 @@ def check_channel(update, context):
 
     username = context.args[0].strip()
     if not username.startswith("@"):
-        update.message.reply_text(
-            "❌ Please provide a valid channel username starting with @"
-        )
+        update.message.reply_text("❌ Please provide a valid channel username starting with @")
         return
 
     doc = channels_collection.find_one({"username": username})
@@ -765,9 +893,7 @@ def check_channel(update, context):
             parse_mode="HTML",
         )
     else:
-        update.message.reply_text(
-            f"❌ Channel {username} is not in the database.", parse_mode="HTML"
-        )
+        update.message.reply_text(f"❌ Channel {username} is not in the database.", parse_mode="HTML")
 
 @authorized
 def delete_channel(update, context):
@@ -777,29 +903,14 @@ def delete_channel(update, context):
 
     username = context.args[0].strip()
     if not username.startswith("@"):
-        update.message.reply_text(
-            "❌ Please provide a valid channel username starting with @"
-        )
+        update.message.reply_text("❌ Please provide a valid channel username starting with @")
         return
 
     result = channels_collection.delete_one({"username": username})
     if result.deleted_count > 0:
-        update.message.reply_text(
-            f"✅ Channel {username} has been deleted from the database."
-        )
+        update.message.reply_text(f"✅ Channel {username} has been deleted from the database.")
     else:
-        update.message.reply_text(
-            f"⚠️ Channel {username} was not found in the database."
-        )
-
-@authorized
-def sync_files_command(update, context):
-    """Manually sync files with Supabase"""
-    try:
-        sync_session_files()
-        update.message.reply_text("✅ Files synced with Supabase!")
-    except Exception as e:
-        update.message.reply_text(f"❌ Error syncing files: {e}")
+        update.message.reply_text(f"⚠️ Channel {username} was not found in the database.")
 
 @authorized
 def unknown_command(update, context):
@@ -812,8 +923,11 @@ def unknown_command(update, context):
         "/deletechannel @ChannelUsername\n"
         "/setup_session - Set up Telegram session\n"
         "/check_session - Check session status\n"
+        "/checksessionusage - Session usage stats\n"
         "/test - Test connection\n"
-        "/sync_files - Sync files with Supabase"
+        "/check_data - Check scraped data\n"
+        "/cleanup - Cleanup sessions\n"
+        "/clearhistory - Clear forwarded history"
     )
 
 # ======================
@@ -827,24 +941,25 @@ def test_connection(update, context):
             async def test_async():
                 client = None
                 try:
-                    client = TelegramClient(USER_SESSION_FILE, API_ID, API_HASH)
-                    await client.connect()
-                    
-                    if not await client.is_user_authorized():
-                        return "❌ Session not authorized. Please run /setup_session first."
+                    client = await get_telethon_client()
+                    if not client:
+                        return "❌ Could not establish connection. Check /checksessionusage for details."
                     
                     me = await client.get_me()
-                    result = f"✅ Telethon connected as: {me.first_name} (@{me.username})"
+                    result = f"✅ Telethon connected as: {me.first_name} (@{me.username})\n\n"
                     
                     try:
                         target = await client.get_entity(FORWARD_CHANNEL)
-                        result += f"\n✅ Target channel accessible: {target.title}"
+                        result += f"✅ Target channel accessible: {target.title}"
                     except Exception as e:
-                        result += f"\n❌ Cannot access target channel {FORWARD_CHANNEL}: {e}"
+                        result += f"❌ Cannot access target channel {FORWARD_CHANNEL}: {e}"
                     
+                    track_session_usage("test", True)
                     return result
                 except Exception as e:
-                    return f"❌ Telethon connection error: {e}"
+                    error_msg = f"Telethon connection error: {e}"
+                    track_session_usage("test", False, error_msg)
+                    return f"❌ {error_msg}"
                 finally:
                     if client:
                         await client.disconnect()
@@ -854,16 +969,10 @@ def test_connection(update, context):
             result = loop.run_until_complete(test_async())
             loop.close()
             
-            context.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text=result
-            )
+            context.bot.send_message(update.effective_chat.id, text=result)
             
         except Exception as e:
-            context.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text=f"❌ Test failed: {e}"
-            )
+            context.bot.send_message(update.effective_chat.id, text=f"❌ Test failed: {e}")
     
     threading.Thread(target=run_test, daemon=True).start()
 
@@ -888,11 +997,9 @@ def clear_forwarded_history(update, context):
     try:
         if os.path.exists(FORWARDED_FILE):
             os.remove(FORWARDED_FILE)
-            delete_from_supabase("data", FORWARDED_FILE)
-            update.message.reply_text("✅ Forwarded messages history cleared from local and Supabase.")
+            update.message.reply_text("✅ Forwarded messages history cleared.")
         else:
-            delete_from_supabase("data", FORWARDED_FILE)
-            update.message.reply_text("✅ Forwarded messages history cleared from Supabase.")
+            update.message.reply_text("ℹ️ No forwarded messages history found.")
     except Exception as e:
         update.message.reply_text(f"❌ Error clearing history: {e}")
 
@@ -900,11 +1007,11 @@ def clear_forwarded_history(update, context):
 # Main
 # ======================
 def main():
-    # Sync files on startup
-    sync_session_files()
-    
+    from telegram.utils.request import Request
+    request = Request(connect_timeout=30, read_timeout=30, con_pool_size=8)
     updater = Updater(BOT_TOKEN, use_context=True)
     dp = updater.dispatcher
+    request=request
 
     dp.add_handler(CommandHandler("start", start))
     dp.add_handler(CommandHandler("code", code))
@@ -914,15 +1021,18 @@ def main():
     dp.add_handler(CommandHandler("deletechannel", delete_channel))
     dp.add_handler(CommandHandler("setup_session", setup_session))
     dp.add_handler(CommandHandler("check_session", check_session))
+    dp.add_handler(CommandHandler("checksessionusage", check_session_usage))
     dp.add_handler(CommandHandler("test", test_connection))
     dp.add_handler(CommandHandler("check_data", check_scraped_data))
     dp.add_handler(CommandHandler("cleanup", cleanup_sessions))
     dp.add_handler(CommandHandler("clearhistory", clear_forwarded_history))
-    dp.add_handler(CommandHandler("sync_files", sync_files_command))
     dp.add_handler(MessageHandler(Filters.command, unknown_command))
 
-    print("🤖 Bot is running with Supabase storage...")
+    print(f"🤖 Bot is running...")
+    print(f"🔧 Using session file: {USER_SESSION_FILE}")
+    print(f"🌍 Environment: {'render' if 'RENDER' in os.environ else 'local'}")
     
+    # Check if session file exists on startup
     if os.path.exists(USER_SESSION_FILE):
         print("✅ User session file found.")
     else:
@@ -933,9 +1043,6 @@ def main():
         updater.idle()
     except KeyboardInterrupt:
         print("\n🛑 Shutting down bot...")
-        # Save files before shutting down
-        save_user_session()
-        save_forwarded_messages()
     except Exception as e:
         print(f"❌ Bot error: {e}")
     finally:
