@@ -201,18 +201,23 @@ def load_parquet_from_s3():
 def save_parquet_to_s3(df):
     """Save parquet data directly to S3 without local files"""
     try:
+        if df.empty:
+            print("⚠️ DataFrame is empty, nothing to save")
+            return False
+            
         # Use in-memory buffer instead of temporary file
         buffer = io.BytesIO()
         df.to_parquet(buffer, engine='pyarrow', index=False)
         buffer.seek(0)
         
-        s3.upload_fileobj(buffer, AWS_BUCKET_NAME, f"data/{scraped_7d}")
-        print(f"✅ Saved parquet to S3: {scraped_7d}")
+        # Upload to S3
+        s3_key = f"data/{scraped_7d}"
+        s3.upload_fileobj(buffer, AWS_BUCKET_NAME, s3_key)
+        print(f"✅ Saved {len(df)} records directly to S3: {s3_key}")
         return True
     except Exception as e:
         print(f"❌ Error saving parquet to S3: {e}")
         return False
-
 # === 🧹 Text cleaning and extraction helpers ===
 def clean_text(text):
     return ' '.join(text.replace('\xa0', ' ').split())
@@ -748,7 +753,7 @@ def check_session_usage(update, context):
 # 7-day scraping function with OPTIMIZED S3 integration
 # ======================
 async def scrape_channel_7days_async(channel_username: str):
-    """Scrape last 7 days of data from a channel and store in S3"""
+    """Scrape last 7 days of data from a channel and store directly in S3"""
     telethon_client = None
     
     try:
@@ -849,25 +854,29 @@ async def scrape_channel_7days_async(channel_username: str):
         
         print(f"📋 Found {len(scraped_data)} matching messages in target channel")
         
-        # Load existing data DIRECTLY FROM S3
+        # Load existing data DIRECTLY FROM S3 (no local file)
         existing_df = load_parquet_from_s3()
         if existing_df is None:
             existing_df = pd.DataFrame()
         
-        print(f"📁 Loaded existing data with {len(existing_df)} records")
+        print(f"📁 Loaded existing data with {len(existing_df)} records from S3")
         
         new_df = pd.DataFrame(scraped_data)
         if not new_df.empty:
+            # Combine and deduplicate
             combined_df = pd.concat([existing_df, new_df], ignore_index=True)
             combined_df = combined_df.drop_duplicates(subset=['product_ref', 'channel'], keep='last')
             
-            # Save DIRECTLY TO S3
-            save_parquet_to_s3(combined_df)
-            print(f"💾 Saved {len(combined_df)} total records to S3")
-            
-            new_count = len(combined_df) - len(existing_df)
-            track_session_usage("scraping", True, f"Scraped {len(scraped_data)} messages")
-            return True, f"✅ Scraped {len(scraped_data)} messages from {channel_username}. Added {new_count} new records to database."
+            # Save DIRECTLY TO S3 (no local file)
+            success = save_parquet_to_s3(combined_df)
+            if success:
+                print(f"💾 Saved {len(combined_df)} total records directly to S3")
+                new_count = len(combined_df) - len(existing_df)
+                track_session_usage("scraping", True, f"Scraped {len(scraped_data)} messages")
+                return True, f"✅ Scraped {len(scraped_data)} messages from {channel_username}. Added {new_count} new records to S3 database."
+            else:
+                track_session_usage("scraping", False, "Failed to save to S3")
+                return False, f"❌ Failed to save scraped data to S3 for {channel_username}."
         else:
             track_session_usage("scraping", True, "No new messages found")
             return False, f"📭 No matching messages found in target channel for {channel_username} in the last 7 days."
@@ -885,7 +894,6 @@ async def scrape_channel_7days_async(channel_username: str):
                 upload_session_file()
             except:
                 pass
-
 def scrape_channel_7days_sync(channel_username: str):
     """Synchronous wrapper for 7-day scraping"""
     try:
@@ -951,6 +959,35 @@ def add_channel(update, context):
         update.message.reply_text(f"❌ Could not add channel: {str(e)}")
     except Exception as e:
         update.message.reply_text(f"❌ Unexpected error: {str(e)}")
+@authorized
+def debug_s3_parquet(update, context):
+    """Debug command to check S3 parquet file status"""
+    try:
+        # Check if file exists in S3
+        s3_key = f"data/{scraped_7d}"
+        exists = file_exists_in_s3(s3_key)
+        
+        if exists:
+            # Try to load and show basic info
+            df = load_parquet_from_s3()
+            if not df.empty:
+                msg = f"✅ S3 Parquet File Status:\n"
+                msg += f"📊 Total Records: {len(df)}\n"
+                msg += f"📅 Date Range: {df['date'].min()} to {df['date'].max()}\n"
+                msg += f"📈 Channels: {df['channel'].nunique()}\n\n"
+                msg += f"🔍 Channel Distribution:\n"
+                channel_counts = df['channel'].value_counts()
+                for channel, count in channel_counts.head(10).items():
+                    msg += f"• {channel}: {count} records\n"
+            else:
+                msg = "⚠️ File exists in S3 but is empty or corrupted"
+        else:
+            msg = "❌ Parquet file does not exist in S3"
+            
+        update.message.reply_text(msg)
+        
+    except Exception as e:
+        update.message.reply_text(f"❌ Debug error: {e}")
 
 @authorized
 def check_scraped_data(update, context):
@@ -1205,6 +1242,7 @@ def start(update, context):
             "/check_s3 - Check S3 status\n"
             "/cleanup - Cleanup sessions\n"
             "/clearhistory - Clear forwarded history"
+            "/debug_parquet - debug_parquet that is in the s3 bucket"
         )
     else:
         update.message.reply_text(
@@ -1256,6 +1294,7 @@ def main():
     dp.add_handler(CommandHandler("clearhistory", clear_forwarded_history))
     dp.add_handler(MessageHandler(Filters.command, unknown_command))
     dp.add_handler(CommandHandler("diagnose", diagnose_session))
+    dp.add_handler(CommandHandler("debug_parquet", debug_s3_parquet))
     print(f"🤖 Bot is running...")
     print(f"🔧 Using session file: {USER_SESSION_FILE}")
     print(f"🌍 Environment: {'render' if 'RENDER' in os.environ else 'local'}")
