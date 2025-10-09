@@ -169,20 +169,36 @@ def load_json_from_s3(s3_key):
         print(f"❌ Error loading JSON from S3: {e}")
         return {}
 
-def save_json_to_s3(data, s3_key):
-    """Save JSON data directly to S3 without local files"""
+def save_parquet_to_s3(df):
+    """Save parquet data directly to S3 without local files"""
     try:
-        s3.put_object(
-            Bucket=AWS_BUCKET_NAME,
-            Key=s3_key,
-            Body=json.dumps(data).encode('utf-8')
-        )
-        print(f"✅ Saved JSON to S3: {s3_key}")
+        if df.empty:
+            print("⚠️ DataFrame is empty, nothing to save")
+            return False
+            
+        # Use in-memory buffer instead of temporary file
+        buffer = io.BytesIO()
+        df.to_parquet(buffer, engine='pyarrow', index=False)
+        buffer.seek(0)
+        
+        # Upload to S3
+        s3_key = f"data/{scraped_7d}"
+        
+        # Ensure the data folder exists
+        try:
+            s3.put_object(Bucket=AWS_BUCKET_NAME, Key="data/")
+            print(f"✅ Ensured folder exists: data/")
+        except Exception:
+            pass  # Folder might already exist
+        
+        s3.upload_fileobj(buffer, AWS_BUCKET_NAME, s3_key)
+        print(f"✅ Saved {len(df)} records directly to S3: {s3_key}")
         return True
     except Exception as e:
-        print(f"❌ Error saving JSON to S3: {e}")
+        print(f"❌ Error saving parquet to S3: {e}")
+        import traceback
+        print(f"🔍 Full traceback: {traceback.format_exc()}")
         return False
-
 # Parquet data functions - DIRECT S3 access (no download/upload)
 def load_parquet_from_s3():
     """Load parquet data directly from S3 without downloading files"""
