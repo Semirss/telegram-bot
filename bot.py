@@ -89,16 +89,46 @@ channels_collection = db["yetalcollection"]
 auth_collection = db["authorized_users"]
 session_usage_collection = db["session_usage"]
 
-# === 🔄 AWS S3 File Management Functions ===
+# === 🔄 AWS S3 File Management Functions (OPTIMIZED) ===
+def file_exists_in_s3(s3_key):
+    """Efficiently check if file exists in S3 using head_object (no download)"""
+    try:
+        s3.head_object(Bucket=AWS_BUCKET_NAME, Key=s3_key)
+        return True
+    except s3.exceptions.NoSuchKey:
+        return False
+    except Exception as e:
+        print(f"❌ Error checking S3 file {s3_key}: {e}")
+        return False
+
+def check_s3_files_status():
+    """Check existence of all required S3 files efficiently"""
+    files_to_check = {
+        "Session File": f"sessions/{USER_SESSION_FILE}",
+        "Forwarded Messages": f"data/{FORWARDED_FILE}",
+        "Scraped Data": f"data/{scraped_7d}"
+    }
+    
+    results = {}
+    for file_type, s3_key in files_to_check.items():
+        exists = file_exists_in_s3(s3_key)
+        results[file_type] = exists
+        status = "✅" if exists else "❌"
+        print(f"{status} {file_type}: {s3_key}")
+    
+    return results
+
 def download_from_s3(s3_key, local_path):
-    """Download file from S3 to local path"""
+    """Download file from S3 to local path ONLY when absolutely needed"""
+    # First check if file exists efficiently without downloading
+    if not file_exists_in_s3(s3_key):
+        print(f"⚠️ File {s3_key} not found in S3, will create new")
+        return False
+    
     try:
         s3.download_file(AWS_BUCKET_NAME, s3_key, local_path)
         print(f"✅ Downloaded {s3_key} from S3 to {local_path}")
         return True
-    except s3.exceptions.NoSuchKey:
-        print(f"⚠️ File {s3_key} not found in S3, will create new")
-        return False
     except Exception as e:
         print(f"❌ Error downloading {s3_key} from S3: {e}")
         return False
@@ -113,52 +143,34 @@ def upload_to_s3(local_path, s3_key):
         print(f"❌ Error uploading {local_path} to S3: {e}")
         return False
 
+# Session file functions - ONLY download when needed for Telethon
 def download_session_file():
-    """Download session file from S3 if it exists"""
+    """Download session file from S3 only if needed for connection"""
     return download_from_s3(f"sessions/{USER_SESSION_FILE}", USER_SESSION_FILE)
 
 def upload_session_file():
-    """Upload session file to S3"""
+    """Upload session file to S3 after operations"""
     if os.path.exists(USER_SESSION_FILE):
         return upload_to_s3(USER_SESSION_FILE, f"sessions/{USER_SESSION_FILE}")
     return False
 
-def download_forwarded_file():
-    """Download forwarded messages file from S3"""
-    return download_from_s3(f"data/{FORWARDED_FILE}", FORWARDED_FILE)
-
-def upload_forwarded_file():
-    """Upload forwarded messages file to S3"""
-    if os.path.exists(FORWARDED_FILE):
-        return upload_to_s3(FORWARDED_FILE, f"data/{FORWARDED_FILE}")
-    return False
-
-def download_parquet_file():
-    """Download parquet file from S3"""
-    return download_from_s3(f"data/{scraped_7d}", scraped_7d)
-
-def upload_parquet_file():
-    """Upload parquet file to S3"""
-    if os.path.exists(scraped_7d):
-        return upload_to_s3(scraped_7d, f"data/{scraped_7d}")
-    return False
-
+# JSON data functions - DIRECT S3 access (no download/upload)
 def load_json_from_s3(s3_key):
-    """Load JSON data directly from S3"""
+    """Load JSON data directly from S3 without downloading files"""
     try:
         response = s3.get_object(Bucket=AWS_BUCKET_NAME, Key=s3_key)
         data = json.loads(response['Body'].read().decode('utf-8'))
         print(f"✅ Loaded JSON from S3: {s3_key}")
         return data
     except s3.exceptions.NoSuchKey:
-        print(f"⚠️ JSON file {s3_key} not found in S3")
+        print(f"⚠️ JSON file {s3_key} not found in S3, returning empty dict")
         return {}
     except Exception as e:
         print(f"❌ Error loading JSON from S3: {e}")
         return {}
 
 def save_json_to_s3(data, s3_key):
-    """Save JSON data directly to S3"""
+    """Save JSON data directly to S3 without local files"""
     try:
         s3.put_object(
             Bucket=AWS_BUCKET_NAME,
@@ -171,26 +183,30 @@ def save_json_to_s3(data, s3_key):
         print(f"❌ Error saving JSON to S3: {e}")
         return False
 
+# Parquet data functions - DIRECT S3 access (no download/upload)
 def load_parquet_from_s3():
-    """Load parquet data from S3"""
+    """Load parquet data directly from S3 without downloading files"""
     try:
         response = s3.get_object(Bucket=AWS_BUCKET_NAME, Key=f"data/{scraped_7d}")
         df = pd.read_parquet(io.BytesIO(response['Body'].read()))
         print(f"✅ Loaded parquet from S3: {scraped_7d}")
         return df
     except s3.exceptions.NoSuchKey:
-        print(f"⚠️ Parquet file {scraped_7d} not found in S3")
+        print(f"⚠️ Parquet file {scraped_7d} not found in S3, returning empty DataFrame")
         return pd.DataFrame()
     except Exception as e:
         print(f"❌ Error loading parquet from S3: {e}")
         return pd.DataFrame()
 
 def save_parquet_to_s3(df):
-    """Save parquet data to S3"""
+    """Save parquet data directly to S3 without local files"""
     try:
-        with tempfile.NamedTemporaryFile(suffix='.parquet') as tmp:
-            df.to_parquet(tmp.name, engine='pyarrow', index=False)
-            s3.upload_file(tmp.name, AWS_BUCKET_NAME, f"data/{scraped_7d}")
+        # Use in-memory buffer instead of temporary file
+        buffer = io.BytesIO()
+        df.to_parquet(buffer, engine='pyarrow', index=False)
+        buffer.seek(0)
+        
+        s3.upload_fileobj(buffer, AWS_BUCKET_NAME, f"data/{scraped_7d}")
         print(f"✅ Saved parquet to S3: {scraped_7d}")
         return True
     except Exception as e:
@@ -317,7 +333,7 @@ def get_session_usage_stats():
         return None
 
 # ======================
-# Session Management with S3
+# Session Management with S3 (OPTIMIZED)
 # ======================
 def cleanup_telethon_sessions(channel_username=None):
     """Clean up Telethon session files for specific channels (not the main user session)"""
@@ -339,12 +355,12 @@ def cleanup_telethon_sessions(channel_username=None):
         print(f"❌ Error cleaning up session files: {e}")
 
 async def get_telethon_client():
-    """Get the main Telethon client with S3 session management"""
+    """Get the main Telethon client with OPTIMIZED S3 session management"""
     client = None
     max_retries = 3
     retry_delay = 2
     
-    # Download session file from S3 before connecting
+    # ONLY download session file if it doesn't exist locally
     if not os.path.exists(USER_SESSION_FILE):
         print(f"📥 Downloading session file from S3: {USER_SESSION_FILE}")
         download_session_file()
@@ -423,16 +439,15 @@ async def get_telethon_client():
     return None
 
 # ======================
-# Forward last 7d posts with S3 integration
+# Forward last 7d posts with OPTIMIZED S3 integration
 # ======================
 async def forward_last_7d_async(channel_username: str):
     """Async function to forward messages using the main Telethon client"""
     telethon_client = None
     
     try:
-        # Download forwarded data from S3
-        print("📥 Downloading forwarded messages data from S3...")
-        download_forwarded_file()
+        # NO DOWNLOAD - Use direct S3 access for forwarded data
+        print("🔍 Loading forwarded messages data directly from S3...")
         
         telethon_client = await get_telethon_client()
         if not telethon_client:
@@ -474,7 +489,7 @@ async def forward_last_7d_async(channel_username: str):
         cutoff = now - timedelta(days=7)
         print(f"⏰ Forwarding messages since: {cutoff}")
 
-        # Load previously forwarded messages with timestamps
+        # Load previously forwarded messages with timestamps - DIRECT FROM S3
         forwarded_data = load_json_from_s3(f"data/{FORWARDED_FILE}")
         forwarded_ids = {
             int(msg_id): datetime.strptime(ts, "%Y-%m-%d %H:%M:%S") 
@@ -559,7 +574,7 @@ async def forward_last_7d_async(channel_username: str):
                 print(f"⚠️ Unexpected error forwarding from {channel_username}: {e}")
                 continue
 
-        # Save updated forwarded IDs to S3
+        # Save updated forwarded IDs DIRECTLY TO S3
         save_json_to_s3(
             {str(k): v.strftime("%Y-%m-%d %H:%M:%S") for k, v in forwarded_ids.items()},
             f"data/{FORWARDED_FILE}"
@@ -730,16 +745,15 @@ def check_session_usage(update, context):
         update.message.reply_text(f"❌ Error checking session usage: {e}")
 
 # ======================
-# 7-day scraping function with S3 integration
+# 7-day scraping function with OPTIMIZED S3 integration
 # ======================
 async def scrape_channel_7days_async(channel_username: str):
     """Scrape last 7 days of data from a channel and store in S3"""
     telethon_client = None
     
     try:
-        # Download parquet data from S3
-        print("📥 Downloading parquet data from S3...")
-        download_parquet_file()
+        # NO DOWNLOAD - Use direct S3 access for parquet data
+        print("🔍 Loading parquet data directly from S3...")
         
         telethon_client = await get_telethon_client()
         if not telethon_client:
@@ -835,7 +849,7 @@ async def scrape_channel_7days_async(channel_username: str):
         
         print(f"📋 Found {len(scraped_data)} matching messages in target channel")
         
-        # Load existing data from S3
+        # Load existing data DIRECTLY FROM S3
         existing_df = load_parquet_from_s3()
         if existing_df is None:
             existing_df = pd.DataFrame()
@@ -847,7 +861,7 @@ async def scrape_channel_7days_async(channel_username: str):
             combined_df = pd.concat([existing_df, new_df], ignore_index=True)
             combined_df = combined_df.drop_duplicates(subset=['product_ref', 'channel'], keep='last')
             
-            # Save to S3
+            # Save DIRECTLY TO S3
             save_parquet_to_s3(combined_df)
             print(f"💾 Saved {len(combined_df)} total records to S3")
             
@@ -885,7 +899,7 @@ def scrape_channel_7days_sync(channel_username: str):
         return False, f"❌ Scraping error: {str(e)}"
 
 # ======================
-# Bot commands (remain the same but now use S3-backed functions)
+# Bot commands (remain the same but now use optimized S3 functions)
 # ======================
 @authorized
 def add_channel(update, context):
@@ -959,8 +973,6 @@ def check_scraped_data(update, context):
     except Exception as e:
         update.message.reply_text(f"❌ Error checking scraped data: {e}")
 
-# ... (other bot commands remain the same as in your original code)
-
 @authorized
 def list_channels(update, context):
     channels = list(channels_collection.find({}))
@@ -1018,6 +1030,43 @@ def delete_channel(update, context):
         update.message.reply_text(f"⚠️ Channel {username} was not found in the database.")
 
 @authorized
+def check_s3_status(update, context):
+    """Check S3 bucket and file status efficiently"""
+    try:
+        # Test S3 connection
+        try:
+            s3.head_bucket(Bucket=AWS_BUCKET_NAME)
+            bucket_status = "✅ Connected"
+        except Exception as e:
+            bucket_status = f"❌ Error: {e}"
+        
+        # Check files efficiently
+        files_status = check_s3_files_status()
+        
+        msg = f"☁️ <b>S3 Status Report (Efficient Check)</b>\n\n"
+        msg += f"<b>Bucket Connection:</b> {bucket_status}\n"
+        msg += f"<b>Bucket Name:</b> {AWS_BUCKET_NAME}\n\n"
+        
+        msg += f"<b>File Status (using head_object):</b>\n"
+        for file_type, exists in files_status.items():
+            status = "✅ Exists" if exists else "❌ Missing"
+            msg += f"• {file_type}: {status}\n"
+        
+        # Add folder structure info
+        msg += f"\n<b>Expected S3 Structure:</b>\n"
+        msg += f"• {AWS_BUCKET_NAME}/\n"
+        msg += f"  ├── sessions/\n"
+        msg += f"  │   └── {USER_SESSION_FILE}\n"
+        msg += f"  └── data/\n"
+        msg += f"      ├── {FORWARDED_FILE}\n"
+        msg += f"      └── {scraped_7d}\n"
+        
+        update.message.reply_text(msg, parse_mode="HTML")
+        
+    except Exception as e:
+        update.message.reply_text(f"❌ Error checking S3 status: {e}")
+
+@authorized
 def unknown_command(update, context):
     update.message.reply_text(
         "❌ Unknown command.\n\n"
@@ -1031,6 +1080,7 @@ def unknown_command(update, context):
         "/checksessionusage - Session usage stats\n"
         "/test - Test connection\n"
         "/check_data - Check scraped data\n"
+        "/check_s3 - Check S3 status\n"
         "/cleanup - Cleanup sessions\n"
         "/clearhistory - Clear forwarded history"
     )
@@ -1121,6 +1171,8 @@ def start(update, context):
             "/check_session - Check session status\n"
             "/checksessionusage - Session usage statistics\n"
             "/test - Test connection\n"
+            "/check_data - Check scraped data\n"
+            "/check_s3 - Check S3 status\n"
             "/cleanup - Cleanup sessions\n"
             "/clearhistory - Clear forwarded history"
         )
@@ -1150,7 +1202,7 @@ def code(update, context):
         update.message.reply_text("❌ Invalid code. Access denied.")
 
 # ======================
-# Main
+# Main (OPTIMIZED)
 # ======================
 def main():
     from telegram.utils.request import Request
@@ -1169,6 +1221,7 @@ def main():
     dp.add_handler(CommandHandler("checksessionusage", check_session_usage))
     dp.add_handler(CommandHandler("test", test_connection))
     dp.add_handler(CommandHandler("check_data", check_scraped_data))
+    dp.add_handler(CommandHandler("check_s3", check_s3_status))
     dp.add_handler(CommandHandler("cleanup", cleanup_sessions))
     dp.add_handler(CommandHandler("clearhistory", clear_forwarded_history))
     dp.add_handler(MessageHandler(Filters.command, unknown_command))
@@ -1178,15 +1231,18 @@ def main():
     print(f"🌍 Environment: {'render' if 'RENDER' in os.environ else 'local'}")
     print(f"☁️ S3 Bucket: {AWS_BUCKET_NAME}")
     
-    # Check if session file exists in S3 on startup
-    try:
-        s3.head_object(Bucket=AWS_BUCKET_NAME, Key=f"sessions/{USER_SESSION_FILE}")
-        print("✅ User session file found in S3.")
-        
-        # Download session file from S3
+    # Efficiently check all S3 files on startup (NO DOWNLOADS)
+    print("\n🔍 Checking S3 files efficiently (using head_object)...")
+    s3_status = check_s3_files_status()
+    
+    # ONLY download session file if it doesn't exist locally
+    if not os.path.exists(USER_SESSION_FILE) and s3_status.get("Session File"):
+        print("📥 Downloading session file from S3...")
         download_session_file()
-    except:
-        print("⚠️ User session file not found in S3. Run /setup_session to create one.")
+    elif not os.path.exists(USER_SESSION_FILE):
+        print("⚠️ No session file found locally or in S3. Run /setup_session to create one.")
+    
+    # NO downloads for JSON and Parquet files - they will be accessed directly from S3
     
     try:
         updater.start_polling()
