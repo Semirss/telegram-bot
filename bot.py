@@ -207,7 +207,7 @@ def save_parquet_to_s3(df):
             
         # Use in-memory buffer instead of temporary file
         buffer = io.BytesIO()
-        df.to_parquet(buffer, engine='pyarrow', index=False)
+        df.to_parquet(buffer, engine='fastparquet', index=False)
         buffer.seek(0)
         
         # Upload to S3 - ensure the path matches your structure
@@ -267,7 +267,7 @@ def ensure_s3_structure():
         print("✅ Created data/ folder in S3")
     except Exception:
         print("✅ data/ folder already exists in S3")
-        
+
 # === 🧹 Text cleaning and extraction helpers ===
 def clean_text(text):
     return ' '.join(text.replace('\xa0', ' ').split())
