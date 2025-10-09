@@ -17,9 +17,7 @@ import sqlite3
 from telethon.sessions import SQLiteSession
 from flask import Flask
 import threading
-import boto3
-import io
-import tempfile
+import os
 
 app = Flask(__name__)
 
@@ -29,7 +27,7 @@ def home():
 
 # Run Flask in a separate thread
 def run_flask():
-    port = int(os.environ.get("PORT", 5000))
+    port = int(os.environ.get("PORT", 5000))  # <-- use Render's PORT
     app.run(host="0.0.0.0", port=port)
 
 threading.Thread(target=run_flask, daemon=True).start()
@@ -40,41 +38,32 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 MONGO_URI = os.getenv("MONGO_URI")
 API_ID = 24916488
 API_HASH = "3b7788498c56da1a02e904ff8e92d494"
-FORWARD_CHANNEL = os.getenv("FORWARD_CHANNEL")
-ADMIN_CODE = os.getenv("ADMIN_CODE")
+FORWARD_CHANNEL = os.getenv("FORWARD_CHANNEL")  # target channel username
+ADMIN_CODE = os.getenv("ADMIN_CODE")  # secret code for access
 
-# === 🔐 AWS S3 Configuration ===
-AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID")
-AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
-AWS_BUCKET_NAME = os.getenv("AWS_BUCKET_NAME", "your-telegram-bot-bucket")
-
-# Initialize S3 client
-s3 = boto3.client(
-    's3',
-    aws_access_key_id=AWS_ACCESS_KEY_ID,
-    aws_secret_access_key=AWS_SECRET_ACCESS_KEY
-)
-
-# === 📁 File names (local and S3) ===
+# === 📁 Files ===
 FORWARDED_FILE = "forwarded_messages.json"
-scraped_7d = "scraped_7d.parquet"
+scraped_7d = "scraped_7d.parquet" 
 
 # === 🔧 Environment Detection ===
 def get_session_filename():
     """Get unique session filename for each environment"""
+    # Detect if running on Render
     if 'RENDER' in os.environ:
         return "session_render.session"
     
+    # Detect if running locally by computer name or other indicators
     computer_name = platform.node().lower()
     username = os.getenv('USER', '').lower()
     
+    # Common local computer identifiers
     local_indicators = ['desktop', 'laptop', 'pc', 'home', 'workstation', 'macbook']
     
     if any(indicator in computer_name for indicator in local_indicators):
         return "session_local.session"
-    elif username and username not in ['render', 'root', 'admin']:
+    elif username and username not in ['render', 'root', 'admin']:  # Common local usernames
         return "session_local.session"
-    elif os.name == 'nt':
+    elif os.name == 'nt':  # Windows
         return "session_local.session"
     else:
         return "session_main.session"
@@ -86,116 +75,8 @@ print(f"🔧 Environment detected: Using session file - {USER_SESSION_FILE}")
 client = MongoClient(MONGO_URI)
 db = client["yetal"]
 channels_collection = db["yetalcollection"]
-auth_collection = db["authorized_users"]
-session_usage_collection = db["session_usage"]
-
-# === 🔄 AWS S3 File Management Functions ===
-def download_from_s3(s3_key, local_path):
-    """Download file from S3 to local path"""
-    try:
-        s3.download_file(AWS_BUCKET_NAME, s3_key, local_path)
-        print(f"✅ Downloaded {s3_key} from S3 to {local_path}")
-        return True
-    except s3.exceptions.NoSuchKey:
-        print(f"⚠️ File {s3_key} not found in S3, will create new")
-        return False
-    except Exception as e:
-        print(f"❌ Error downloading {s3_key} from S3: {e}")
-        return False
-
-def upload_to_s3(local_path, s3_key):
-    """Upload file from local path to S3"""
-    try:
-        s3.upload_file(local_path, AWS_BUCKET_NAME, s3_key)
-        print(f"✅ Uploaded {local_path} to S3 as {s3_key}")
-        return True
-    except Exception as e:
-        print(f"❌ Error uploading {local_path} to S3: {e}")
-        return False
-
-def download_session_file():
-    """Download session file from S3 if it exists"""
-    return download_from_s3(f"sessions/{USER_SESSION_FILE}", USER_SESSION_FILE)
-
-def upload_session_file():
-    """Upload session file to S3"""
-    if os.path.exists(USER_SESSION_FILE):
-        return upload_to_s3(USER_SESSION_FILE, f"sessions/{USER_SESSION_FILE}")
-    return False
-
-def download_forwarded_file():
-    """Download forwarded messages file from S3"""
-    return download_from_s3(f"data/{FORWARDED_FILE}", FORWARDED_FILE)
-
-def upload_forwarded_file():
-    """Upload forwarded messages file to S3"""
-    if os.path.exists(FORWARDED_FILE):
-        return upload_to_s3(FORWARDED_FILE, f"data/{FORWARDED_FILE}")
-    return False
-
-def download_parquet_file():
-    """Download parquet file from S3"""
-    return download_from_s3(f"data/{scraped_7d}", scraped_7d)
-
-def upload_parquet_file():
-    """Upload parquet file to S3"""
-    if os.path.exists(scraped_7d):
-        return upload_to_s3(scraped_7d, f"data/{scraped_7d}")
-    return False
-
-def load_json_from_s3(s3_key):
-    """Load JSON data directly from S3"""
-    try:
-        response = s3.get_object(Bucket=AWS_BUCKET_NAME, Key=s3_key)
-        data = json.loads(response['Body'].read().decode('utf-8'))
-        print(f"✅ Loaded JSON from S3: {s3_key}")
-        return data
-    except s3.exceptions.NoSuchKey:
-        print(f"⚠️ JSON file {s3_key} not found in S3")
-        return {}
-    except Exception as e:
-        print(f"❌ Error loading JSON from S3: {e}")
-        return {}
-
-def save_json_to_s3(data, s3_key):
-    """Save JSON data directly to S3"""
-    try:
-        s3.put_object(
-            Bucket=AWS_BUCKET_NAME,
-            Key=s3_key,
-            Body=json.dumps(data).encode('utf-8')
-        )
-        print(f"✅ Saved JSON to S3: {s3_key}")
-        return True
-    except Exception as e:
-        print(f"❌ Error saving JSON to S3: {e}")
-        return False
-
-def load_parquet_from_s3():
-    """Load parquet data from S3"""
-    try:
-        response = s3.get_object(Bucket=AWS_BUCKET_NAME, Key=f"data/{scraped_7d}")
-        df = pd.read_parquet(io.BytesIO(response['Body'].read()))
-        print(f"✅ Loaded parquet from S3: {scraped_7d}")
-        return df
-    except s3.exceptions.NoSuchKey:
-        print(f"⚠️ Parquet file {scraped_7d} not found in S3")
-        return pd.DataFrame()
-    except Exception as e:
-        print(f"❌ Error loading parquet from S3: {e}")
-        return pd.DataFrame()
-
-def save_parquet_to_s3(df):
-    """Save parquet data to S3"""
-    try:
-        with tempfile.NamedTemporaryFile(suffix='.parquet') as tmp:
-            df.to_parquet(tmp.name, engine='pyarrow', index=False)
-            s3.upload_file(tmp.name, AWS_BUCKET_NAME, f"data/{scraped_7d}")
-        print(f"✅ Saved parquet to S3: {scraped_7d}")
-        return True
-    except Exception as e:
-        print(f"❌ Error saving parquet to S3: {e}")
-        return False
+auth_collection = db["authorized_users"]  # store authorized user IDs
+session_usage_collection = db["session_usage"]  # track session usage
 
 # === 🧹 Text cleaning and extraction helpers ===
 def clean_text(text):
@@ -275,6 +156,7 @@ def track_session_usage(operation: str, success: bool, error_msg: str = ""):
 def get_session_usage_stats():
     """Get session usage statistics"""
     try:
+        # Last 24 hours stats
         day_ago = datetime.now() - timedelta(hours=24)
         
         total_operations = session_usage_collection.count_documents({
@@ -291,11 +173,13 @@ def get_session_usage_stats():
             "success": False
         })
         
+        # Recent errors
         recent_errors = list(session_usage_collection.find({
             "timestamp": {"$gte": day_ago},
             "success": False
         }).sort("timestamp", -1).limit(5))
         
+        # Environment usage
         env_usage = session_usage_collection.aggregate([
             {"$match": {"timestamp": {"$gte": day_ago}}},
             {"$group": {"_id": "$environment", "count": {"$sum": 1}}}
@@ -317,7 +201,7 @@ def get_session_usage_stats():
         return None
 
 # ======================
-# Session Management with S3
+# Session Management
 # ======================
 def cleanup_telethon_sessions(channel_username=None):
     """Clean up Telethon session files for specific channels (not the main user session)"""
@@ -339,25 +223,23 @@ def cleanup_telethon_sessions(channel_username=None):
         print(f"❌ Error cleaning up session files: {e}")
 
 async def get_telethon_client():
-    """Get the main Telethon client with S3 session management"""
+    """Get the main Telethon client with robust error handling and retry logic"""
     client = None
     max_retries = 3
     retry_delay = 2
-    
-    # Download session file from S3 before connecting
-    if not os.path.exists(USER_SESSION_FILE):
-        print(f"📥 Downloading session file from S3: {USER_SESSION_FILE}")
-        download_session_file()
     
     for attempt in range(max_retries):
         try:
             print(f"🔧 Attempt {attempt + 1}/{max_retries} to connect Telethon client...")
             
+            # Create session with explicit handling
             session = SQLiteSession(USER_SESSION_FILE)
             client = TelegramClient(session, API_ID, API_HASH)
             
+            # Connect with timeout
             await asyncio.wait_for(client.connect(), timeout=15)
             
+            # Check if authorized
             if not await client.is_user_authorized():
                 error_msg = "Session not authorized"
                 print(f"❌ {error_msg}")
@@ -365,6 +247,7 @@ async def get_telethon_client():
                 await client.disconnect()
                 return None
             
+            # Verify connection by getting user info
             me = await asyncio.wait_for(client.get_me(), timeout=10)
             print(f"✅ Telethon connected successfully as: {me.first_name} (@{me.username})")
             track_session_usage("connection", True)
@@ -423,17 +306,14 @@ async def get_telethon_client():
     return None
 
 # ======================
-# Forward last 7d posts with S3 integration
+# Forward last 7d posts from a given channel with duplicate prevention
 # ======================
 async def forward_last_7d_async(channel_username: str):
     """Async function to forward messages using the main Telethon client"""
     telethon_client = None
     
     try:
-        # Download forwarded data from S3
-        print("📥 Downloading forwarded messages data from S3...")
-        download_forwarded_file()
-        
+        # Use the main user session client
         telethon_client = await get_telethon_client()
         if not telethon_client:
             error_msg = "Failed to initialize Telethon client after retries"
@@ -475,16 +355,20 @@ async def forward_last_7d_async(channel_username: str):
         print(f"⏰ Forwarding messages since: {cutoff}")
 
         # Load previously forwarded messages with timestamps
-        forwarded_data = load_json_from_s3(f"data/{FORWARDED_FILE}")
-        forwarded_ids = {
-            int(msg_id): datetime.strptime(ts, "%Y-%m-%d %H:%M:%S") 
-            for msg_id, ts in forwarded_data.items()
-        } if forwarded_data else {}
+        if os.path.exists(FORWARDED_FILE):
+            with open(FORWARDED_FILE, "r") as f:
+                forwarded_data = json.load(f)
+                forwarded_ids = {
+                    int(msg_id): datetime.strptime(ts, "%Y-%m-%d %H:%M:%S") 
+                    for msg_id, ts in forwarded_data.items()
+                }
+        else:
+            forwarded_ids = {}
 
         # Remove forwarded IDs older than 7 days
         week_cutoff = now - timedelta(days=7)
         forwarded_ids = {msg_id: ts for msg_id, ts in forwarded_ids.items() 
-                        if ts >= week_cutoff.replace(tzinfo=None)}
+                        if datetime.strptime(forwarded_data[str(msg_id)], "%Y-%m-%d %H:%M:%S") >= week_cutoff.replace(tzinfo=None)}
 
         messages_to_forward = []
         message_count = 0
@@ -525,6 +409,7 @@ async def forward_last_7d_async(channel_username: str):
         for i in range(0, len(messages_to_forward), 10):
             batch = messages_to_forward[i:i+10]
             try:
+                # Add timeout to avoid hanging forever
                 await asyncio.wait_for(
                     telethon_client.forward_messages(
                         entity=FORWARD_CHANNEL,
@@ -540,7 +425,7 @@ async def forward_last_7d_async(channel_username: str):
                     total_forwarded += 1
                 
                 print(f"✅ Forwarded batch {i//10 + 1}/{(len(messages_to_forward)-1)//10 + 1} ({len(batch)} messages)")
-                await asyncio.sleep(1)
+                await asyncio.sleep(1)  # Small delay between batches
                 
             except ChatForwardsRestrictedError:
                 print(f"🚫 Forwarding restricted for channel {channel_username}, skipping...")
@@ -559,11 +444,9 @@ async def forward_last_7d_async(channel_username: str):
                 print(f"⚠️ Unexpected error forwarding from {channel_username}: {e}")
                 continue
 
-        # Save updated forwarded IDs to S3
-        save_json_to_s3(
-            {str(k): v.strftime("%Y-%m-%d %H:%M:%S") for k, v in forwarded_ids.items()},
-            f"data/{FORWARDED_FILE}"
-        )
+        # Save updated forwarded IDs
+        with open(FORWARDED_FILE, "w") as f:
+            json.dump({str(k): v.strftime("%Y-%m-%d %H:%M:%S") for k, v in forwarded_ids.items()}, f)
 
         if total_forwarded > 0:
             track_session_usage("forwarding", True, f"Forwarded {total_forwarded} messages")
@@ -578,20 +461,20 @@ async def forward_last_7d_async(channel_username: str):
         track_session_usage("forwarding", False, error_msg)
         return False, f"❌ Critical error: {str(e)}"
     finally:
-        # Upload session file to S3 after operations
+        # Ensure client is disconnected even if there's an error
         if telethon_client:
             try:
                 await telethon_client.disconnect()
-                print("📤 Uploading updated session file to S3...")
-                upload_session_file()
             except:
                 pass
 
 def forward_last_7d_sync(channel_username: str):
     """Synchronous wrapper for the async forwarding function"""
     try:
+        # Create a new event loop for this operation
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
+        
         result = loop.run_until_complete(forward_last_7d_async(channel_username))
         loop.close()
         return result
@@ -600,7 +483,7 @@ def forward_last_7d_sync(channel_username: str):
         return False, f"❌ Error: {str(e)}"
 
 # ======================
-# Session management commands with S3
+# Session management commands
 # ======================
 @authorized
 def setup_session(update, context):
@@ -613,14 +496,10 @@ def setup_session(update, context):
                     client = TelegramClient(USER_SESSION_FILE, API_ID, API_HASH)
                     await client.start()
                     
+                    # This will prompt for phone number and code on first run
                     me = await client.get_me()
                     result = f"✅ Session setup successful!\nLogged in as: {me.first_name} (@{me.username})\n\nSession file: {USER_SESSION_FILE}"
                     track_session_usage("setup", True)
-                    
-                    # Upload session to S3 after setup
-                    print("📤 Uploading new session to S3...")
-                    upload_session_file()
-                    
                     return result
                 except Exception as e:
                     error_msg = f"Session setup failed: {e}"
@@ -691,8 +570,7 @@ def check_session_usage(update, context):
         msg = f"📊 <b>Session Usage Statistics (Last 24h)</b>\n\n"
         msg += f"🔧 <b>Current Session:</b> {stats['current_session']}\n"
         msg += f"🌍 <b>Environment:</b> {stats['current_environment']}\n"
-        msg += f"💻 <b>Computer:</b> {platform.node()}\n"
-        msg += f"☁️ <b>S3 Bucket:</b> {AWS_BUCKET_NAME}\n\n"
+        msg += f"💻 <b>Computer:</b> {platform.node()}\n\n"
         
         msg += f"📈 <b>Operations Summary:</b>\n"
         msg += f"• Total Operations: {stats['total_operations']}\n"
@@ -730,17 +608,59 @@ def check_session_usage(update, context):
         update.message.reply_text(f"❌ Error checking session usage: {e}")
 
 # ======================
-# 7-day scraping function with S3 integration
+# /start command
 # ======================
+def start(update, context):
+    user_id = update.effective_user.id
+    if auth_collection.find_one({"user_id": user_id}):
+        update.message.reply_text(
+            "✅ You are already authorized!\n\n"
+            "Available commands:\n"
+            "/addchannel @ChannelUsername\n"
+            "/listchannels\n"
+            "/checkchannel @ChannelUsername\n"
+            "/deletechannel @ChannelUsername\n"
+            "/setup_session - Set up Telegram session (first time)\n"
+            "/check_session - Check session status\n"
+            "/checksessionusage - Session usage statistics\n"
+            "/test - Test connection\n"
+            "/cleanup - Cleanup sessions\n"
+            "/clearhistory - Clear forwarded history"
+        )
+    else:
+        update.message.reply_text(
+            "⚡ Welcome! Please enter your access code using /code YOUR_CODE"
+        )
+
+# ======================
+# /code command
+# ======================
+def code(update, context):
+    user_id = update.effective_user.id
+    if auth_collection.find_one({"user_id": user_id}):
+        update.message.reply_text("✅ You are already authorized!")
+        return
+
+    if len(context.args) == 0:
+        update.message.reply_text("⚠️ Usage: /code YOUR_ACCESS_CODE")
+        return
+
+    entered_code = context.args[0].strip()
+    if entered_code == ADMIN_CODE:
+        auth_collection.insert_one({"user_id": user_id})
+        update.message.reply_text(
+            "✅ Code accepted! You can now use the bot commands.\n\n"
+            "⚠️ Important: Run /setup_session first to set up your Telegram session."
+        )
+    else:
+        update.message.reply_text("❌ Invalid code. Access denied.")
+
+# === 📊 7-day scraping function ===
 async def scrape_channel_7days_async(channel_username: str):
-    """Scrape last 7 days of data from a channel and store in S3"""
+    """Scrape last 7 days of data from a channel and append to parquet file"""
     telethon_client = None
     
     try:
-        # Download parquet data from S3
-        print("📥 Downloading parquet data from S3...")
-        download_parquet_file()
-        
         telethon_client = await get_telethon_client()
         if not telethon_client:
             track_session_usage("scraping", False, "Failed to initialize client")
@@ -835,21 +755,17 @@ async def scrape_channel_7days_async(channel_username: str):
         
         print(f"📋 Found {len(scraped_data)} matching messages in target channel")
         
-        # Load existing data from S3
-        existing_df = load_parquet_from_s3()
-        if existing_df is None:
-            existing_df = pd.DataFrame()
-        
-        print(f"📁 Loaded existing data with {len(existing_df)} records")
+        existing_df = pd.DataFrame()
+        if os.path.exists(scraped_7d):
+            existing_df = pd.read_parquet(scraped_7d, engine='pyarrow')
+            print(f"📁 Loaded existing data with {len(existing_df)} records")
         
         new_df = pd.DataFrame(scraped_data)
         if not new_df.empty:
             combined_df = pd.concat([existing_df, new_df], ignore_index=True)
             combined_df = combined_df.drop_duplicates(subset=['product_ref', 'channel'], keep='last')
-            
-            # Save to S3
-            save_parquet_to_s3(combined_df)
-            print(f"💾 Saved {len(combined_df)} total records to S3")
+            combined_df.to_parquet(scraped_7d, engine='pyarrow', index=False)
+            print(f"💾 Saved {len(combined_df)} total records to {scraped_7d}")
             
             new_count = len(combined_df) - len(existing_df)
             track_session_usage("scraping", True, f"Scraped {len(scraped_data)} messages")
@@ -866,9 +782,6 @@ async def scrape_channel_7days_async(channel_username: str):
         if telethon_client:
             try:
                 await telethon_client.disconnect()
-                # Upload session file to S3 after operations
-                print("📤 Uploading updated session file to S3...")
-                upload_session_file()
             except:
                 pass
 
@@ -885,7 +798,7 @@ def scrape_channel_7days_sync(channel_username: str):
         return False, f"❌ Scraping error: {str(e)}"
 
 # ======================
-# Bot commands (remain the same but now use S3-backed functions)
+# Bot commands
 # ======================
 @authorized
 def add_channel(update, context):
@@ -940,13 +853,13 @@ def add_channel(update, context):
 
 @authorized
 def check_scraped_data(update, context):
-    """Check the current scraped data statistics from S3"""
+    """Check the current scraped data statistics"""
     try:
-        df = load_parquet_from_s3()
-        if not df.empty:
+        if os.path.exists(scraped_7d):
+            df = pd.read_parquet(scraped_7d, engine='pyarrow')
             channel_counts = df['channel'].value_counts()
             
-            msg = f"📊 <b>Scraped Data Summary (from S3):</b>\n"
+            msg = f"📊 <b>Scraped Data Summary:</b>\n"
             msg += f"Total records: {len(df)}\n\n"
             msg += "<b>Records per channel:</b>\n"
             
@@ -955,11 +868,9 @@ def check_scraped_data(update, context):
                 
             update.message.reply_text(msg, parse_mode="HTML")
         else:
-            update.message.reply_text("📭 No scraped data found in S3 yet.")
+            update.message.reply_text("📭 No scraped data found yet.")
     except Exception as e:
         update.message.reply_text(f"❌ Error checking scraped data: {e}")
-
-# ... (other bot commands remain the same as in your original code)
 
 @authorized
 def list_channels(update, context):
@@ -1035,27 +946,23 @@ def unknown_command(update, context):
         "/clearhistory - Clear forwarded history"
     )
 
+# ======================
+# Test command to check telethon connection
+# ======================
 @authorized
 def test_connection(update, context):
-    """Test if Telethon client is working with S3"""
+    """Test if Telethon client is working"""
     def run_test():
         try:
             async def test_async():
                 client = None
                 try:
-                    # Test S3 connection first
-                    try:
-                        s3.head_bucket(Bucket=AWS_BUCKET_NAME)
-                        s3_status = "✅ S3 connection successful"
-                    except Exception as e:
-                        s3_status = f"❌ S3 connection failed: {e}"
-                    
                     client = await get_telethon_client()
                     if not client:
-                        return f"{s3_status}\n❌ Could not establish Telethon connection."
+                        return "❌ Could not establish connection. Check /checksessionusage for details."
                     
                     me = await client.get_me()
-                    result = f"{s3_status}\n✅ Telethon connected as: {me.first_name} (@{me.username})\n\n"
+                    result = f"✅ Telethon connected as: {me.first_name} (@{me.username})\n\n"
                     
                     try:
                         target = await client.get_entity(FORWARD_CHANNEL)
@@ -1085,6 +992,9 @@ def test_connection(update, context):
     
     threading.Thread(target=run_test, daemon=True).start()
 
+# ======================
+# Cleanup command to remove all temporary session files
+# ======================
 @authorized
 def cleanup_sessions(update, context):
     """Clean up all temporary Telethon session files (except main user session)"""
@@ -1094,60 +1004,20 @@ def cleanup_sessions(update, context):
     except Exception as e:
         update.message.reply_text(f"❌ Error cleaning up sessions: {e}")
 
+# ======================
+# Clear forwarded messages history
+# ======================
 @authorized
 def clear_forwarded_history(update, context):
-    """Clear the forwarded messages history from S3"""
+    """Clear the forwarded messages history file"""
     try:
-        # Delete the forwarded file from S3
-        try:
-            s3.delete_object(Bucket=AWS_BUCKET_NAME, Key=f"data/{FORWARDED_FILE}")
-            update.message.reply_text("✅ Forwarded messages history cleared from S3.")
-        except Exception as e:
-            update.message.reply_text(f"❌ Error clearing history from S3: {e}")
+        if os.path.exists(FORWARDED_FILE):
+            os.remove(FORWARDED_FILE)
+            update.message.reply_text("✅ Forwarded messages history cleared.")
+        else:
+            update.message.reply_text("ℹ️ No forwarded messages history found.")
     except Exception as e:
         update.message.reply_text(f"❌ Error clearing history: {e}")
-
-def start(update, context):
-    user_id = update.effective_user.id
-    if auth_collection.find_one({"user_id": user_id}):
-        update.message.reply_text(
-            "✅ You are already authorized!\n\n"
-            "Available commands:\n"
-            "/addchannel @ChannelUsername\n"
-            "/listchannels\n"
-            "/checkchannel @ChannelUsername\n"
-            "/deletechannel @ChannelUsername\n"
-            "/setup_session - Set up Telegram session (first time)\n"
-            "/check_session - Check session status\n"
-            "/checksessionusage - Session usage statistics\n"
-            "/test - Test connection\n"
-            "/cleanup - Cleanup sessions\n"
-            "/clearhistory - Clear forwarded history"
-        )
-    else:
-        update.message.reply_text(
-            "⚡ Welcome! Please enter your access code using /code YOUR_CODE"
-        )
-
-def code(update, context):
-    user_id = update.effective_user.id
-    if auth_collection.find_one({"user_id": user_id}):
-        update.message.reply_text("✅ You are already authorized!")
-        return
-
-    if len(context.args) == 0:
-        update.message.reply_text("⚠️ Usage: /code YOUR_ACCESS_CODE")
-        return
-
-    entered_code = context.args[0].strip()
-    if entered_code == ADMIN_CODE:
-        auth_collection.insert_one({"user_id": user_id})
-        update.message.reply_text(
-            "✅ Code accepted! You can now use the bot commands.\n\n"
-            "⚠️ Important: Run /setup_session first to set up your Telegram session."
-        )
-    else:
-        update.message.reply_text("❌ Invalid code. Access denied.")
 
 # ======================
 # Main
@@ -1155,8 +1025,9 @@ def code(update, context):
 def main():
     from telegram.utils.request import Request
     request = Request(connect_timeout=30, read_timeout=30, con_pool_size=8)
-    updater = Updater(BOT_TOKEN, use_context=True, request=request)
+    updater = Updater(BOT_TOKEN, use_context=True)
     dp = updater.dispatcher
+    request=request
 
     dp.add_handler(CommandHandler("start", start))
     dp.add_handler(CommandHandler("code", code))
@@ -1176,17 +1047,12 @@ def main():
     print(f"🤖 Bot is running...")
     print(f"🔧 Using session file: {USER_SESSION_FILE}")
     print(f"🌍 Environment: {'render' if 'RENDER' in os.environ else 'local'}")
-    print(f"☁️ S3 Bucket: {AWS_BUCKET_NAME}")
     
-    # Check if session file exists in S3 on startup
-    try:
-        s3.head_object(Bucket=AWS_BUCKET_NAME, Key=f"sessions/{USER_SESSION_FILE}")
-        print("✅ User session file found in S3.")
-        
-        # Download session file from S3
-        download_session_file()
-    except:
-        print("⚠️ User session file not found in S3. Run /setup_session to create one.")
+    # Check if session file exists on startup
+    if os.path.exists(USER_SESSION_FILE):
+        print("✅ User session file found.")
+    else:
+        print("⚠️ User session file not found. Run /setup_session to create one.")
     
     try:
         updater.start_polling()
