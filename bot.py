@@ -154,34 +154,6 @@ def upload_session_file():
         return upload_to_s3(USER_SESSION_FILE, f"sessions/{USER_SESSION_FILE}")
     return False
 
-# JSON data functions - DIRECT S3 access (no download/upload)
-def load_json_from_s3(s3_key):
-    """Load JSON data directly from S3 without downloading files"""
-    try:
-        response = s3.get_object(Bucket=AWS_BUCKET_NAME, Key=s3_key)
-        data = json.loads(response['Body'].read().decode('utf-8'))
-        print(f"✅ Loaded JSON from S3: {s3_key}")
-        return data
-    except s3.exceptions.NoSuchKey:
-        print(f"⚠️ JSON file {s3_key} not found in S3, returning empty dict")
-        return {}
-    except Exception as e:
-        print(f"❌ Error loading JSON from S3: {e}")
-        return {}
-
-def save_json_to_s3(data, s3_key):
-    """Save JSON data directly to S3 without local files"""
-    try:
-        s3.put_object(
-            Bucket=AWS_BUCKET_NAME,
-            Key=s3_key,
-            Body=json.dumps(data).encode('utf-8')
-        )
-        print(f"✅ Saved JSON to S3: {s3_key}")
-        return True
-    except Exception as e:
-        print(f"❌ Error saving JSON to S3: {e}")
-        return False
 
 # Parquet data functions - DIRECT S3 access (no download/upload)
 def load_parquet_from_s3():
@@ -275,21 +247,8 @@ def save_parquet_to_s3(df):
             print("🔍 [DEBUG] Attempting to write parquet with fastparquet engine...")
             df.to_parquet(buffer, engine='fastparquet', index=False, compression='snappy')
             print("✅ [DEBUG] Successfully wrote parquet with fastparquet")
-        except Exception as fastparquet_error:
-            print(f"⚠️ [DEBUG] fastparquet failed: {fastparquet_error}")
-            try:
-                buffer = io.BytesIO()  # Reset buffer
-                print("🔍 [DEBUG] Attempting to write parquet with pyarrow engine...")
-                df.to_parquet(buffer, engine='pyarrow', index=False, compression='snappy')
-                print("✅ [DEBUG] Successfully wrote parquet with pyarrow")
-            except Exception as pyarrow_error:
-                print(f"⚠️ [DEBUG] pyarrow failed: {pyarrow_error}")
-                try:
-                    buffer = io.BytesIO()  # Reset buffer
-                    print("🔍 [DEBUG] Attempting to write parquet without compression...")
-                    df.to_parquet(buffer, engine='fastparquet', index=False, compression=None)
-                    print("✅ [DEBUG] Successfully wrote parquet without compression")
-                except Exception as no_compression_error:
+        
+        except Exception as no_compression_error:
                     print(f"❌ [DEBUG] All parquet writing attempts failed: {no_compression_error}")
                     return False
         
