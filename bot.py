@@ -267,7 +267,6 @@ def ensure_s3_structure():
         print("✅ Created data/ folder in S3")
     except Exception:
         print("✅ data/ folder already exists in S3")
-        
 # === 🧹 Text cleaning and extraction helpers ===
 def clean_text(text):
     return ' '.join(text.replace('\xa0', ' ').split())
