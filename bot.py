@@ -154,186 +154,104 @@ def upload_session_file():
         return upload_to_s3(USER_SESSION_FILE, f"sessions/{USER_SESSION_FILE}")
     return False
 
+# JSON data functions - DIRECT S3 access (no download/upload)
+def load_json_from_s3(s3_key):
+    """Load JSON data directly from S3 without downloading files"""
+    try:
+        response = s3.get_object(Bucket=AWS_BUCKET_NAME, Key=s3_key)
+        data = json.loads(response['Body'].read().decode('utf-8'))
+        print(f"✅ Loaded JSON from S3: {s3_key}")
+        return data
+    except s3.exceptions.NoSuchKey:
+        print(f"⚠️ JSON file {s3_key} not found in S3, returning empty dict")
+        return {}
+    except Exception as e:
+        print(f"❌ Error loading JSON from S3: {e}")
+        return {}
+
+def save_json_to_s3(data, s3_key):
+    """Save JSON data directly to S3 without local files"""
+    try:
+        s3.put_object(
+            Bucket=AWS_BUCKET_NAME,
+            Key=s3_key,
+            Body=json.dumps(data).encode('utf-8')
+        )
+        print(f"✅ Saved JSON to S3: {s3_key}")
+        return True
+    except Exception as e:
+        print(f"❌ Error saving JSON to S3: {e}")
+        return False
 
 # Parquet data functions - DIRECT S3 access (no download/upload)
 def load_parquet_from_s3():
-    """Load parquet data directly from S3 without downloading files - DEBUG VERSION"""
-    s3_key = f"data/{scraped_7d}"
-    print(f"🔍 [DEBUG] Attempting to load parquet from S3: {s3_key}")
-    
+    """Load parquet data directly from S3 without downloading files"""
     try:
-        # First check if file exists and get its info
-        try:
-            head_response = s3.head_object(Bucket=AWS_BUCKET_NAME, Key=s3_key)
-            file_size = head_response['ContentLength']
-            last_modified = head_response['LastModified']
-            print(f"✅ [DEBUG] Parquet file found in S3:")
-            print(f"   - Size: {file_size} bytes")
-            print(f"   - Last modified: {last_modified}")
-        except s3.exceptions.NoSuchKey:
-            print(f"⚠️ [DEBUG] Parquet file {s3_key} not found in S3")
-            return pd.DataFrame()
-        except Exception as head_error:
-            print(f"⚠️ [DEBUG] Error checking parquet file in S3: {head_error}")
-            return pd.DataFrame()
-        
-        # Now download and load the file
-        print("🔍 [DEBUG] Downloading parquet file from S3...")
-        response = s3.get_object(Bucket=AWS_BUCKET_NAME, Key=s3_key)
-        file_content = response['Body'].read()
-        print(f"✅ [DEBUG] Downloaded {len(file_content)} bytes from S3")
-        
-        # Try different parquet engines
-        try:
-            print("🔍 [DEBUG] Attempting to read parquet with fastparquet engine...")
-            df = pd.read_parquet(io.BytesIO(file_content), engine='fastparquet')
-            print("✅ [DEBUG] Successfully loaded parquet with fastparquet")
-        except Exception as fastparquet_error:
-            print(f"⚠️ [DEBUG] fastparquet failed: {fastparquet_error}")
-            try:
-                print("🔍 [DEBUG] Attempting to read parquet with pyarrow engine...")
-                df = pd.read_parquet(io.BytesIO(file_content), engine='pyarrow')
-                print("✅ [DEBUG] Successfully loaded parquet with pyarrow")
-            except Exception as pyarrow_error:
-                print(f"❌ [DEBUG] Both parquet engines failed:")
-                print(f"   - fastparquet error: {fastparquet_error}")
-                print(f"   - pyarrow error: {pyarrow_error}")
-                return pd.DataFrame()
-        
-        print(f"✅ [DEBUG] Successfully loaded DataFrame from S3:")
-        print(f"   - Shape: {df.shape}")
-        print(f"   - Columns: {list(df.columns)}")
-        print(f"   - Memory usage: {df.memory_usage(deep=True).sum()} bytes")
-        
-        if not df.empty and 'date' in df.columns:
-            print(f"   - Date range: {df['date'].min()} to {df['date'].max()}")
-        if not df.empty and 'channel' in df.columns:
-            print(f"   - Unique channels: {df['channel'].nunique()}")
-            
+        response = s3.get_object(Bucket=AWS_BUCKET_NAME, Key=f"data/{scraped_7d}")
+        df = pd.read_parquet(io.BytesIO(response['Body'].read()))
+        print(f"✅ Loaded parquet from S3: {scraped_7d}")
         return df
-        
-    except Exception as e:
-        print(f"❌ [DEBUG] Error loading parquet from S3: {e}")
-        import traceback
-        print(f"🔍 [DEBUG] Full traceback: {traceback.format_exc()}")
+    except s3.exceptions.NoSuchKey:
+        print(f"⚠️ Parquet file {scraped_7d} not found in S3, returning empty DataFrame")
         return pd.DataFrame()
-    
+    except Exception as e:
+        print(f"❌ Error loading parquet from S3: {e}")
+        return pd.DataFrame()
+
 def save_parquet_to_s3(df):
-    """Save parquet data directly to S3 without local files - DEBUG VERSION"""
-    print(f"🔍 [DEBUG] Starting save_parquet_to_s3 with DataFrame:")
-    print(f"   - DataFrame shape: {df.shape if not df.empty else 'EMPTY'}")
-    print(f"   - DataFrame columns: {list(df.columns) if not df.empty else 'NO COLUMNS'}")
-    print(f"   - DataFrame memory usage: {df.memory_usage(deep=True).sum() if not df.empty else 0} bytes")
-    
+    """Save parquet data directly to S3 without local files"""
     try:
         if df.empty:
-            print("⚠️ [DEBUG] DataFrame is empty, nothing to save")
+            print("⚠️ DataFrame is empty, nothing to save")
             return False
             
-        # Check if DataFrame has the expected columns for debugging
-        expected_columns = ['title', 'description', 'price', 'phone', 'location', 'date', 
-                          'channel', 'post_link', 'product_ref', 'scraped_at']
-        missing_columns = [col for col in expected_columns if col not in df.columns]
-        if missing_columns:
-            print(f"⚠️ [DEBUG] DataFrame missing columns: {missing_columns}")
-            print(f"   - Available columns: {list(df.columns)}")
-        
         # Use in-memory buffer instead of temporary file
-        print("🔍 [DEBUG] Creating in-memory buffer...")
         buffer = io.BytesIO()
-        
-        # Try different parquet engines and compression options
-        try:
-            print("🔍 [DEBUG] Attempting to write parquet with fastparquet engine...")
-            df.to_parquet(buffer, engine='fastparquet', index=False, compression='snappy')
-            print("✅ [DEBUG] Successfully wrote parquet with fastparquet")
-        
-        except Exception as no_compression_error:
-                    print(f"❌ [DEBUG] All parquet writing attempts failed: {no_compression_error}")
-                    return False
-        
-        # Get buffer size and position
-        buffer_size = buffer.getbuffer().nbytes
-        buffer_position = buffer.tell()
-        print(f"🔍 [DEBUG] Buffer info - Size: {buffer_size} bytes, Position: {buffer_position}")
-        
-        if buffer_size == 0:
-            print("❌ [DEBUG] Buffer is empty after writing parquet")
-            return False
-            
-        # Reset buffer position to beginning
+        df.to_parquet(buffer, engine='pyarrow', index=False)
         buffer.seek(0)
-        print("✅ [DEBUG] Buffer reset to position 0")
         
         # Upload to S3 - ensure the path matches your structure
         s3_key = f"data/{scraped_7d}"
-        print(f"🔍 [DEBUG] Preparing to upload to S3: {s3_key}")
         
         # Ensure the data folder exists by creating a placeholder
         try:
-            print("🔍 [DEBUG] Ensuring data/ folder exists in S3...")
             s3.put_object(Bucket=AWS_BUCKET_NAME, Key="data/")
-            print("✅ [DEBUG] data/ folder ensured in S3")
-        except Exception as folder_error:
-            print(f"⚠️ [DEBUG] Could not create data folder (may already exist): {folder_error}")
+            print("✅ Ensured data/ folder exists in S3")
+        except Exception as e:
+            print(f"⚠️ Could not create data folder (may already exist): {e}")
         
-        # Upload the parquet file with detailed progress tracking
-        print(f"🔍 [DEBUG] Starting S3 upload for {s3_key}...")
-        try:
-            # Use upload_fileobj for better memory management
-            s3.upload_fileobj(
-                buffer, 
-                AWS_BUCKET_NAME, 
-                s3_key,
-                ExtraArgs={
-                    'ContentType': 'application/parquet',
-                    'Metadata': {
-                        'records': str(len(df)),
-                        'columns': str(len(df.columns)),
-                        'saved_at': datetime.now().isoformat()
-                    }
-                }
-            )
-            print(f"✅ [DEBUG] Successfully uploaded {buffer_size} bytes to S3: {s3_key}")
-            
-            # Verify the upload by checking file existence and size
-            try:
-                head_response = s3.head_object(Bucket=AWS_BUCKET_NAME, Key=s3_key)
-                s3_size = head_response['ContentLength']
-                print(f"✅ [DEBUG] S3 verification - File size: {s3_size} bytes")
-                
-                if s3_size == buffer_size:
-                    print("✅ [DEBUG] S3 file size matches buffer size - upload successful!")
-                else:
-                    print(f"⚠️ [DEBUG] S3 file size mismatch: buffer={buffer_size}, S3={s3_size}")
-                    
-            except Exception as verify_error:
-                print(f"⚠️ [DEBUG] Could not verify S3 upload: {verify_error}")
-            
-            # Log successful operation details
-            print(f"📊 [SUCCESS] Saved {len(df)} records directly to S3: {s3_key}")
-            print(f"   - File size: {buffer_size} bytes")
-            print(f"   - Columns: {list(df.columns)}")
-            if 'date' in df.columns:
-                print(f"   - Date range: {df['date'].min()} to {df['date'].max()}")
-            if 'channel' in df.columns:
-                print(f"   - Channels: {df['channel'].nunique()}")
-            
-            return True
-            
-        except Exception as upload_error:
-            print(f"❌ [DEBUG] S3 upload failed: {upload_error}")
-            print(f"🔍 [DEBUG] Upload error details:")
-            print(f"   - Error type: {type(upload_error).__name__}")
-            print(f"   - Error message: {str(upload_error)}")
-            return False
-            
+        # Upload the parquet file
+        s3.upload_fileobj(buffer, AWS_BUCKET_NAME, s3_key)
+        print(f"✅ Saved {len(df)} records directly to S3: {s3_key}")
+        return True
     except Exception as e:
-        print(f"❌ [DEBUG] Critical error in save_parquet_to_s3: {e}")
-        print(f"🔍 [DEBUG] Full traceback:")
+        print(f"❌ Error saving parquet to S3: {e}")
         import traceback
-        traceback.print_exc()
+        print(f"🔍 Full traceback: {traceback.format_exc()}")
         return False
+
+def save_json_to_s3(data, s3_key):
+    """Save JSON data directly to S3 without local files"""
+    try:
+        # Ensure the folder exists
+        folder = s3_key.split('/')[0] + '/'
+        try:
+            s3.put_object(Bucket=AWS_BUCKET_NAME, Key=folder)
+            print(f"✅ Ensured {folder} folder exists in S3")
+        except Exception:
+            pass  # Folder might already exist
+        
+        s3.put_object(
+            Bucket=AWS_BUCKET_NAME,
+            Key=s3_key,
+            Body=json.dumps(data).encode('utf-8')
+        )
+        print(f"✅ Saved JSON to S3: {s3_key}")
+        return True
+    except Exception as e:
+        print(f"❌ Error saving JSON to S3: {e}")
+        return False
+
 def ensure_s3_structure():
     """Ensure the required S3 folder structure exists"""
     try:
@@ -349,7 +267,7 @@ def ensure_s3_structure():
         print("✅ Created data/ folder in S3")
     except Exception:
         print("✅ data/ folder already exists in S3")
-
+        
 # === 🧹 Text cleaning and extraction helpers ===
 def clean_text(text):
     return ' '.join(text.replace('\xa0', ' ').split())
