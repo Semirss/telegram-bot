@@ -1156,7 +1156,37 @@ def clear_forwarded_history(update, context):
             update.message.reply_text(f"❌ Error clearing history from S3: {e}")
     except Exception as e:
         update.message.reply_text(f"❌ Error clearing history: {e}")
-
+@authorized
+def diagnose_session(update, context):
+    """Diagnose session issues"""
+    try:
+        # Check local file
+        local_exists = os.path.exists(USER_SESSION_FILE)
+        local_size = os.path.getsize(USER_SESSION_FILE) if local_exists else 0
+        
+        # Check S3 file
+        s3_exists = file_exists_in_s3(f"sessions/{USER_SESSION_FILE}")
+        
+        msg = f"🔍 <b>Session Diagnosis</b>\n\n"
+        msg += f"📁 <b>Session File:</b> {USER_SESSION_FILE}\n"
+        msg += f"💻 <b>Local Exists:</b> {'✅' if local_exists else '❌'}\n"
+        if local_exists:
+            msg += f"📏 <b>Local Size:</b> {local_size} bytes\n"
+        msg += f"☁️ <b>S3 Exists:</b> {'✅' if s3_exists else '❌'}\n\n"
+        
+        if not local_exists and not s3_exists:
+            msg += "❌ <b>Problem:</b> No session file exists anywhere!\n"
+            msg += "💡 <b>Solution:</b> Create session locally and upload to S3\n"
+        elif local_exists and local_size < 100:
+            msg += "⚠️ <b>Problem:</b> Session file is too small (corrupted)\n"
+        else:
+            msg += "🔧 <b>Problem:</b> Session exists but not authorized\n"
+            msg += "💡 <b>Solution:</b> Create fresh session locally\n"
+        
+        update.message.reply_text(msg, parse_mode="HTML")
+        
+    except Exception as e:
+        update.message.reply_text(f"❌ Diagnosis error: {e}")
 def start(update, context):
     user_id = update.effective_user.id
     if auth_collection.find_one({"user_id": user_id}):
@@ -1225,7 +1255,7 @@ def main():
     dp.add_handler(CommandHandler("cleanup", cleanup_sessions))
     dp.add_handler(CommandHandler("clearhistory", clear_forwarded_history))
     dp.add_handler(MessageHandler(Filters.command, unknown_command))
-
+    dp.add_handler(CommandHandler("diagnose", diagnose_session))
     print(f"🤖 Bot is running...")
     print(f"🔧 Using session file: {USER_SESSION_FILE}")
     print(f"🌍 Environment: {'render' if 'RENDER' in os.environ else 'local'}")
