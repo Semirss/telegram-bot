@@ -169,36 +169,20 @@ def load_json_from_s3(s3_key):
         print(f"❌ Error loading JSON from S3: {e}")
         return {}
 
-def save_parquet_to_s3(df):
-    """Save parquet data directly to S3 without local files"""
+def save_json_to_s3(data, s3_key):
+    """Save JSON data directly to S3 without local files"""
     try:
-        if df.empty:
-            print("⚠️ DataFrame is empty, nothing to save")
-            return False
-            
-        # Use in-memory buffer instead of temporary file
-        buffer = io.BytesIO()
-        df.to_parquet(buffer, engine='pyarrow', index=False)
-        buffer.seek(0)
-        
-        # Upload to S3
-        s3_key = f"data/{scraped_7d}"
-        
-        # Ensure the data folder exists
-        try:
-            s3.put_object(Bucket=AWS_BUCKET_NAME, Key="data/")
-            print(f"✅ Ensured folder exists: data/")
-        except Exception:
-            pass  # Folder might already exist
-        
-        s3.upload_fileobj(buffer, AWS_BUCKET_NAME, s3_key)
-        print(f"✅ Saved {len(df)} records directly to S3: {s3_key}")
+        s3.put_object(
+            Bucket=AWS_BUCKET_NAME,
+            Key=s3_key,
+            Body=json.dumps(data).encode('utf-8')
+        )
+        print(f"✅ Saved JSON to S3: {s3_key}")
         return True
     except Exception as e:
-        print(f"❌ Error saving parquet to S3: {e}")
-        import traceback
-        print(f"🔍 Full traceback: {traceback.format_exc()}")
+        print(f"❌ Error saving JSON to S3: {e}")
         return False
+
 # Parquet data functions - DIRECT S3 access (no download/upload)
 def load_parquet_from_s3():
     """Load parquet data directly from S3 without downloading files"""
@@ -226,14 +210,64 @@ def save_parquet_to_s3(df):
         df.to_parquet(buffer, engine='pyarrow', index=False)
         buffer.seek(0)
         
-        # Upload to S3
+        # Upload to S3 - ensure the path matches your structure
         s3_key = f"data/{scraped_7d}"
+        
+        # Ensure the data folder exists by creating a placeholder
+        try:
+            s3.put_object(Bucket=AWS_BUCKET_NAME, Key="data/")
+            print("✅ Ensured data/ folder exists in S3")
+        except Exception as e:
+            print(f"⚠️ Could not create data folder (may already exist): {e}")
+        
+        # Upload the parquet file
         s3.upload_fileobj(buffer, AWS_BUCKET_NAME, s3_key)
         print(f"✅ Saved {len(df)} records directly to S3: {s3_key}")
         return True
     except Exception as e:
         print(f"❌ Error saving parquet to S3: {e}")
+        import traceback
+        print(f"🔍 Full traceback: {traceback.format_exc()}")
         return False
+
+def save_json_to_s3(data, s3_key):
+    """Save JSON data directly to S3 without local files"""
+    try:
+        # Ensure the folder exists
+        folder = s3_key.split('/')[0] + '/'
+        try:
+            s3.put_object(Bucket=AWS_BUCKET_NAME, Key=folder)
+            print(f"✅ Ensured {folder} folder exists in S3")
+        except Exception:
+            pass  # Folder might already exist
+        
+        s3.put_object(
+            Bucket=AWS_BUCKET_NAME,
+            Key=s3_key,
+            Body=json.dumps(data).encode('utf-8')
+        )
+        print(f"✅ Saved JSON to S3: {s3_key}")
+        return True
+    except Exception as e:
+        print(f"❌ Error saving JSON to S3: {e}")
+        return False
+
+def ensure_s3_structure():
+    """Ensure the required S3 folder structure exists"""
+    try:
+        # Create sessions folder
+        s3.put_object(Bucket=AWS_BUCKET_NAME, Key="sessions/")
+        print("✅ Created sessions/ folder in S3")
+    except Exception:
+        print("✅ sessions/ folder already exists in S3")
+    
+    try:
+        # Create data folder
+        s3.put_object(Bucket=AWS_BUCKET_NAME, Key="data/")
+        print("✅ Created data/ folder in S3")
+    except Exception:
+        print("✅ data/ folder already exists in S3")
+        
 # === 🧹 Text cleaning and extraction helpers ===
 def clean_text(text):
     return ' '.join(text.replace('\xa0', ' ').split())
