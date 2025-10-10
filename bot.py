@@ -199,26 +199,31 @@ def load_parquet_from_s3():
         return pd.DataFrame()
 
 def save_parquet_to_s3(df):
-    """Save parquet data directly to S3 without local files - FIXED VERSION"""
+    """Save parquet data to both S3 and local for debugging"""
     try:
         if df.empty:
             print("⚠️ DataFrame is empty, nothing to save")
             return False
             
-        print(f"💾 Attempting to save {len(df)} records to S3...")
+        print(f"💾 Attempting to save {len(df)} records to S3 and local...")
         
-        # Use in-memory buffer
+        # Use in-memory buffer for S3
         buffer = io.BytesIO()
         
         # Use different engine if pyarrow fails
         try:
             df.to_parquet(buffer, engine='pyarrow', index=False)
+            # Also save locally with same engine
+            local_success = save_parquet_locally(df, 'pyarrow')
         except Exception as e:
             print(f"⚠️ PyArrow failed, trying fastparquet: {e}")
             try:
                 df.to_parquet(buffer, engine='fastparquet', index=False)
+                local_success = save_parquet_locally(df, 'fastparquet')
             except Exception as e2:
                 print(f"❌ Both parquet engines failed: {e2}")
+                # Still try to save locally with default engine
+                local_success = save_parquet_locally(df, 'auto')
                 return False
         
         buffer.seek(0)
@@ -227,7 +232,8 @@ def save_parquet_to_s3(df):
         s3_key = f"data/{scraped_7d}"
         print(f"📤 Uploading to S3: {s3_key}")
         
-        # Upload with error handling
+        # Upload to S3 with error handling
+        s3_success = False
         try:
             s3.upload_fileobj(
                 buffer, 
@@ -236,18 +242,31 @@ def save_parquet_to_s3(df):
                 ExtraArgs={'ContentType': 'application/octet-stream'}
             )
             print(f"✅ Successfully saved {len(df)} records to S3: {s3_key}")
+            s3_success = True
             
             # Verify the upload
             try:
                 s3.head_object(Bucket=AWS_BUCKET_NAME, Key=s3_key)
-                print("✅ Upload verification successful")
+                print("✅ S3 upload verification successful")
             except Exception as e:
-                print(f"⚠️ Upload verification failed: {e}")
+                print(f"⚠️ S3 upload verification failed: {e}")
                 
-            return True
-            
         except Exception as upload_error:
             print(f"❌ S3 upload failed: {upload_error}")
+            s3_success = False
+        
+        # Report results
+        if s3_success and local_success:
+            print("✅ Data saved successfully to both S3 and local")
+            return True
+        elif s3_success and not local_success:
+            print("✅ Data saved to S3 but local save failed")
+            return True  # Still consider success if S3 works
+        elif not s3_success and local_success:
+            print("❌ S3 save failed but data saved locally")
+            return False
+        else:
+            print("❌ Both S3 and local save failed")
             return False
             
     except Exception as e:
@@ -255,6 +274,52 @@ def save_parquet_to_s3(df):
         import traceback
         print(f"🔍 Full traceback: {traceback.format_exc()}")
         return False
+
+def save_parquet_locally(df, engine='auto'):
+    """Save parquet data locally for debugging"""
+    try:
+        local_path = f"local_debug_{scraped_7d}"
+        
+        if engine == 'auto':
+            df.to_parquet(local_path, index=False)
+        else:
+            df.to_parquet(local_path, engine=engine, index=False)
+        
+        # Verify local file
+        if os.path.exists(local_path):
+            file_size = os.path.getsize(local_path)
+            print(f"✅ Local save successful: {local_path} ({file_size} bytes)")
+            
+            # Try to read it back to verify
+            try:
+                test_df = pd.read_parquet(local_path)
+                print(f"✅ Local file verification: {len(test_df)} records read back")
+                return True
+            except Exception as e:
+                print(f"⚠️ Local file verification failed: {e}")
+                return True  # File exists but might be corrupted
+        else:
+            print("❌ Local file was not created")
+            return False
+            
+    except Exception as e:
+        print(f"❌ Local parquet save failed: {e}")
+        return False
+
+def load_parquet_locally():
+    """Load parquet data from local file for debugging"""
+    try:
+        local_path = f"local_debug_{scraped_7d}"
+        if os.path.exists(local_path):
+            df = pd.read_parquet(local_path)
+            print(f"✅ Loaded {len(df)} records from local file: {local_path}")
+            return df
+        else:
+            print(f"⚠️ Local file {local_path} not found")
+            return pd.DataFrame()
+    except Exception as e:
+        print(f"❌ Error loading local parquet: {e}")
+        return pd.DataFrame()
 def save_json_to_s3(data, s3_key):
     """Save JSON data directly to S3 without local files"""
     try:
@@ -737,6 +802,83 @@ def setup_session(update, context):
     update.message.reply_text("🔐 Starting session setup... This may require phone number verification.")
     threading.Thread(target=run_session_setup, daemon=True).start()
 @authorized
+def debug_parquet_comprehensive(update, context):
+    """Comprehensive debug command to check both S3 and local parquet files"""
+    try:
+        s3_key = f"data/{scraped_7d}"
+        local_path = f"local_debug_{scraped_7d}"
+        
+        msg = f"🔍 <b>Comprehensive Parquet Debug</b>\n\n"
+        
+        # Check S3 file
+        s3_exists = file_exists_in_s3(s3_key)
+        msg += f"☁️ <b>S3 Status:</b> {'✅ Exists' if s3_exists else '❌ Missing'}\n"
+        
+        if s3_exists:
+            try:
+                response = s3.head_object(Bucket=AWS_BUCKET_NAME, Key=s3_key)
+                s3_size = response['ContentLength']
+                s3_modified = response['LastModified']
+                msg += f"📏 <b>S3 Size:</b> {s3_size} bytes\n"
+                msg += f"🕒 <b>S3 Modified:</b> {s3_modified}\n"
+                
+                # Try to load S3 data
+                s3_df = load_parquet_from_s3()
+                if not s3_df.empty:
+                    msg += f"📊 <b>S3 Data:</b> {len(s3_df)} records\n"
+                else:
+                    msg += "⚠️ S3 file exists but contains no data\n"
+            except Exception as e:
+                msg += f"❌ <b>S3 Error:</b> {e}\n"
+        
+        msg += "\n"
+        
+        # Check local file
+        local_exists = os.path.exists(local_path)
+        msg += f"💻 <b>Local Status:</b> {'✅ Exists' if local_exists else '❌ Missing'}\n"
+        
+        if local_exists:
+            try:
+                local_size = os.path.getsize(local_path)
+                local_mtime = datetime.fromtimestamp(os.path.getmtime(local_path))
+                msg += f"📏 <b>Local Size:</b> {local_size} bytes\n"
+                msg += f"🕒 <b>Local Modified:</b> {local_mtime}\n"
+                
+                # Try to load local data
+                local_df = load_parquet_locally()
+                if not local_df.empty:
+                    msg += f"📊 <b>Local Data:</b> {len(local_df)} records\n"
+                    
+                    # Compare S3 and local if both exist
+                    if s3_exists and not s3_df.empty:
+                        if len(s3_df) == len(local_df):
+                            msg += "✅ S3 and local records match\n"
+                        else:
+                            msg += f"⚠️ Record count mismatch: S3={len(s3_df)} vs Local={len(local_df)}\n"
+                else:
+                    msg += "⚠️ Local file exists but contains no data\n"
+            except Exception as e:
+                msg += f"❌ <b>Local Error:</b> {e}\n"
+        
+        # Data summary if available
+        df_to_show = s3_df if not s3_df.empty else local_df
+        if not df_to_show.empty:
+            msg += f"\n📈 <b>Data Summary:</b>\n"
+            msg += f"• Total Records: {len(df_to_show)}\n"
+            msg += f"• Date Range: {df_to_show['date'].min() if 'date' in df_to_show.columns else 'N/A'} to {df_to_show['date'].max() if 'date' in df_to_show.columns else 'N/A'}\n"
+            msg += f"• Channels: {df_to_show['channel'].nunique() if 'channel' in df_to_show.columns else 'N/A'}\n"
+            
+            if 'channel' in df_to_show.columns:
+                msg += f"\n🔍 <b>Top Channels:</b>\n"
+                channel_counts = df_to_show['channel'].value_counts().head(3)
+                for channel, count in channel_counts.items():
+                    msg += f"• {channel}: {count} records\n"
+        
+        update.message.reply_text(msg, parse_mode="HTML")
+        
+    except Exception as e:
+        update.message.reply_text(f"❌ Comprehensive debug error: {e}")
+@authorized
 def test_s3_write(update, context):
     """Test S3 write functionality with a small sample"""
     try:
@@ -858,7 +1000,7 @@ def check_session_usage(update, context):
 # 7-day scraping function with OPTIMIZED S3 integration
 # ======================
 async def scrape_channel_7days_async(channel_username: str):
-    """Scrape last 7 days of data from a channel and store directly in S3"""
+    """Scrape last 7 days of data from a channel and store in both S3 and locally"""
     telethon_client = None
     
     try:
@@ -972,22 +1114,32 @@ async def scrape_channel_7days_async(channel_username: str):
             combined_df = pd.concat([existing_df, new_df], ignore_index=True)
             combined_df = combined_df.drop_duplicates(subset=['product_ref', 'channel'], keep='last')
             
-            # Save DIRECTLY TO S3 (no local file)
+            # Save to BOTH S3 and local
             success = save_parquet_to_s3(combined_df)
             if success:
-                print(f"💾 Saved {len(combined_df)} total records directly to S3")
+                print(f"💾 Saved {len(combined_df)} total records to S3 and local")
                 new_count = len(combined_df) - len(existing_df)
                 track_session_usage("scraping", True, f"Scraped {len(scraped_data)} messages")
-                return True, f"✅ Scraped {len(scraped_data)} messages from {channel_username}. Added {new_count} new records to S3 database."
+                return True, f"✅ Scraped {len(scraped_data)} messages from {channel_username}. Added {new_count} new records to database."
             else:
-                track_session_usage("scraping", False, "Failed to save to S3")
-                return False, f"❌ Failed to save scraped data to S3 for {channel_username}."
+                # Check if at least local save worked
+                local_df = load_parquet_locally()
+                if not local_df.empty:
+                    print(f"⚠️ S3 save failed but {len(local_df)} records saved locally")
+                    track_session_usage("scraping", False, "S3 save failed but local backup exists")
+                    return False, f"⚠️ S3 save failed but {len(local_df)} records saved locally for {channel_username}. Check /debug_parquet_comprehensive for details."
+                else:
+                    track_session_usage("scraping", False, "Both S3 and local save failed")
+                    return False, f"❌ Failed to save scraped data for {channel_username}."
         else:
             track_session_usage("scraping", True, "No new messages found")
             return False, f"📭 No matching messages found in target channel for {channel_username} in the last 7 days."
             
     except Exception as e:
         error_msg = f"Scraping error: {str(e)}"
+        print(f"❌ {error_msg}")
+        import traceback
+        print(f"🔍 Full traceback: {traceback.format_exc()}")
         track_session_usage("scraping", False, error_msg)
         return False, f"❌ Scraping error: {str(e)}"
     finally:
@@ -997,8 +1149,8 @@ async def scrape_channel_7days_async(channel_username: str):
                 # Upload session file to S3 after operations
                 print("📤 Uploading updated session file to S3...")
                 upload_session_file()
-            except:
-                pass
+            except Exception as e:
+                print(f"⚠️ Error during cleanup: {e}")
 def scrape_channel_7days_sync(channel_username: str):
     """Synchronous wrapper for 7-day scraping"""
     try:
