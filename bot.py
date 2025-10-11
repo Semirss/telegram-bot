@@ -170,7 +170,7 @@ def load_parquet_from_s3():
         print(f"❌ Error loading parquet from S3: {e}")
         return pd.DataFrame()
 
-def save_parquet_to_s3(df):
+def save_parquet_to_s3(df, s3_key=None):
     """Save parquet data to S3 ONLY using the proven approach from test script"""
     try:
         if df.empty:
@@ -179,17 +179,17 @@ def save_parquet_to_s3(df):
             
         print(f"💾 Attempting to save {len(df)} records to S3...")
         
-        # Use in-memory buffer (same as test script)
+        # Use in-memory buffer
         buffer = io.BytesIO()
         
-        # Try different parquet engines (same as test script)
+        # Try different parquet engines
         engines = ['pyarrow', 'fastparquet', 'auto']
         success = False
         
         for engine in engines:
             try:
                 print(f"🔄 Trying parquet engine: {engine}")
-                buffer.seek(0)  # Reset buffer
+                buffer.seek(0)
                 df.to_parquet(buffer, engine=engine, index=False)
                 success = True
                 print(f"✅ Success with engine: {engine}")
@@ -204,11 +204,13 @@ def save_parquet_to_s3(df):
         
         buffer.seek(0)
         
-        # S3 key with proper path
-        s3_key = f"data/{scraped_7d}"
-        print(f"📤 Uploading to S3 bucket: {AWS_BUCKET_NAME}")
+        # Use provided key or default
+        if s3_key is None:
+            s3_key = f"data/scraped_{datetime.now().strftime('%Y%m%d_%H%M%S')}.parquet"
         
-        # Upload to S3 (same as test script)
+        print(f"📤 Uploading to S3 bucket: {AWS_BUCKET_NAME}, key: {s3_key}")
+        
+        # Upload to S3
         s3.upload_fileobj(
             buffer, 
             AWS_BUCKET_NAME, 
@@ -218,7 +220,7 @@ def save_parquet_to_s3(df):
         
         print(f"✅ Successfully uploaded {len(df)} records to S3")
         
-        # Verify upload (same as test script)
+        # Verify upload
         try:
             response = s3.head_object(Bucket=AWS_BUCKET_NAME, Key=s3_key)
             file_size = response['ContentLength']
@@ -236,7 +238,6 @@ def save_parquet_to_s3(df):
         import traceback
         print(f"🔍 Full traceback: {traceback.format_exc()}")
         return False
-
 def ensure_s3_structure():
     """Ensure the required S3 folder structure exists"""
     try:
