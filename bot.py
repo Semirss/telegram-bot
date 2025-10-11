@@ -173,62 +173,141 @@ def load_parquet_from_s3():
 def save_parquet_to_s3(df, s3_key=None):
     """Save parquet data to S3 ONLY using the proven approach from test script"""
     try:
+        # Enhanced DataFrame debugging
+        print(f"\n🔍 DEBUG SAVE_PARQUET_TO_S3:")
+        print(f"📊 DataFrame type: {type(df)}")
+        print(f"📊 DataFrame shape: {df.shape if hasattr(df, 'shape') else 'No shape'}")
+        print(f"📝 DataFrame columns: {df.columns.tolist() if hasattr(df, 'columns') else 'No columns'}")
+        
         if df.empty:
             print("⚠️ DataFrame is empty, nothing to save")
             return False
             
         print(f"💾 Attempting to save {len(df)} records to S3...")
         
+        # Check for problematic data types
+        print(f"🔍 Checking data types...")
+        for col in df.columns:
+            dtype = df[col].dtype
+            null_count = df[col].isnull().sum()
+            print(f"   {col}: {dtype} ({null_count} nulls)")
+        
         # Use in-memory buffer
         buffer = io.BytesIO()
         
-        # Try different parquet engines
+        # Try different parquet engines with enhanced error handling
         engines = ['pyarrow', 'fastparquet', 'auto']
         success = False
+        last_error = None
         
         for engine in engines:
             try:
                 print(f"🔄 Trying parquet engine: {engine}")
                 buffer.seek(0)
-                df.to_parquet(buffer, engine=engine, index=False)
+                
+                # Enhanced parquet save with specific error handling
+                if engine == 'pyarrow':
+                    df.to_parquet(buffer, engine=engine, index=False, compression='snappy')
+                elif engine == 'fastparquet':
+                    df.to_parquet(buffer, engine=engine, index=False, compression='SNAPPY')
+                else:
+                    df.to_parquet(buffer, engine=engine, index=False)
+                
+                # Verify the buffer has data
+                buffer_size = buffer.getbuffer().nbytes
+                print(f"✅ Success with engine: {engine} - Buffer size: {buffer_size} bytes")
+                
                 success = True
-                print(f"✅ Success with engine: {engine}")
                 break
+                
             except Exception as e:
-                print(f"❌ Engine {engine} failed: {e}")
+                last_error = e
+                print(f"❌ Engine {engine} failed: {str(e)}")
+                
+                # Specific error handling
+                if "unsupported type" in str(e).lower():
+                    print(f"   🔧 Data type issue detected. Trying to convert object columns to string...")
+                    try:
+                        # Convert object columns to string
+                        for col in df.columns:
+                            if df[col].dtype == 'object':
+                                df[col] = df[col].astype(str)
+                        print(f"   ✅ Converted object columns to string, retrying...")
+                        continue  # Retry with same engine
+                    except Exception as conversion_error:
+                        print(f"   ❌ Column conversion failed: {conversion_error}")
+                
                 continue
         
         if not success:
-            print("❌ All parquet engines failed")
+            print(f"❌ All parquet engines failed. Last error: {last_error}")
             return False
         
         buffer.seek(0)
         
         # Use provided key or default
         if s3_key is None:
-            s3_key = f"data/scraped_{datetime.now().strftime('%Y%m%d_%H%M%S')}.parquet"
+            s3_key = f"data/scraped_7d.parquet"
         
         print(f"📤 Uploading to S3 bucket: {AWS_BUCKET_NAME}, key: {s3_key}")
         
-        # Upload to S3
-        s3.upload_fileobj(
-            buffer, 
-            AWS_BUCKET_NAME, 
-            s3_key,
-            ExtraArgs={'ContentType': 'application/octet-stream'}
-        )
+        # Upload to S3 with retry logic
+        max_upload_retries = 2
+        for attempt in range(max_upload_retries):
+            try:
+                s3.upload_fileobj(
+                    buffer, 
+                    AWS_BUCKET_NAME, 
+                    s3_key,
+                    ExtraArgs={
+                        'ContentType': 'application/octet-stream',
+                        'Metadata': {
+                            'records': str(len(df)),
+                            'channels': str(df['channel'].nunique() if 'channel' in df.columns else 0),
+                            'saved_at': datetime.now().isoformat()
+                        }
+                    }
+                )
+                print(f"✅ Successfully uploaded {len(df)} records to S3")
+                break
+                
+            except Exception as upload_error:
+                if attempt < max_upload_retries - 1:
+                    print(f"⚠️ Upload attempt {attempt + 1} failed: {upload_error}. Retrying...")
+                    buffer.seek(0)  # Reset buffer for retry
+                    continue
+                else:
+                    print(f"❌ All upload attempts failed: {upload_error}")
+                    return False
         
-        print(f"✅ Successfully uploaded {len(df)} records to S3")
-        
-        # Verify upload
+        # Enhanced verification
         try:
             response = s3.head_object(Bucket=AWS_BUCKET_NAME, Key=s3_key)
             file_size = response['ContentLength']
             last_modified = response['LastModified']
+            metadata = response.get('Metadata', {})
+            
             print(f"✅ Upload verification successful!")
             print(f"📏 File size: {file_size} bytes")
             print(f"🕒 Last modified: {last_modified}")
+            print(f"📋 Metadata: {metadata}")
+            
+            # Quick read verification
+            try:
+                verify_df = load_parquet_from_s3()
+                if not verify_df.empty:
+                    print(f"🔍 Read verification: {len(verify_df)} records loaded back successfully")
+                    if len(verify_df) == len(df):
+                        print("✅ Record count matches!")
+                    else:
+                        print(f"⚠️ Record count mismatch: original={len(df)}, loaded={len(verify_df)}")
+                else:
+                    print("⚠️ Read verification: loaded DataFrame is empty")
+            except Exception as verify_error:
+                print(f"⚠️ Read verification failed: {verify_error}")
+            
             return True
+            
         except Exception as e:
             print(f"⚠️ Upload verification failed: {e}")
             return False
@@ -237,7 +316,7 @@ def save_parquet_to_s3(df, s3_key=None):
         print(f"❌ Error saving to S3: {e}")
         import traceback
         print(f"🔍 Full traceback: {traceback.format_exc()}")
-        return False
+        return Falsec
 def ensure_s3_structure():
     """Ensure the required S3 folder structure exists"""
     try:
@@ -881,16 +960,31 @@ async def scrape_channel_7days_async(channel_username: str):
     telethon_client = None
     
     try:
-        # Use direct S3 access for parquet data
-        print("🔍 Loading parquet data directly from S3...")
+        print(f"🔍 Starting 7-day scrape for channel: {channel_username}")
+        
+        # Enhanced debugging for DataFrame
+        def debug_dataframe(df, operation):
+            print(f"\n🔍 DEBUG {operation}:")
+            print(f"📊 Shape: {df.shape}")
+            print(f"📝 Columns: {df.columns.tolist() if hasattr(df, 'columns') else 'No columns'}")
+            if not df.empty:
+                print(f"💭 Data types:\n{df.dtypes}")
+                print(f"📋 First 2 rows sample:")
+                for i, row in df.head(2).iterrows():
+                    print(f"   Row {i}: {dict(row)}")
+            else:
+                print("❌ DataFrame is EMPTY")
         
         telethon_client = await get_telethon_client()
         if not telethon_client:
             track_session_usage("scraping", False, "Failed to initialize client")
             return False, "❌ Could not establish connection for scraping."
         
-        print(f"🔍 Starting 7-day scrape for channel: {channel_username}")
+        print(f"🔍 Loading existing parquet data directly from S3...")
+        existing_df = load_parquet_from_s3()
+        debug_dataframe(existing_df, "EXISTING DATA")
         
+        print(f"🔍 Resolving channel entity: {channel_username}")
         try:
             entity = await telethon_client.get_entity(channel_username)
             print(f"✅ Channel found: {entity.title}")
@@ -978,24 +1072,26 @@ async def scrape_channel_7days_async(channel_username: str):
         
         print(f"📋 Found {len(scraped_data)} matching messages in target channel")
         
-        # Load existing data DIRECTLY FROM S3
-        existing_df = load_parquet_from_s3()
-        if existing_df is None:
-            existing_df = pd.DataFrame()
-        
-        print(f"📁 Loaded existing data with {len(existing_df)} records from S3")
-        
         new_df = pd.DataFrame(scraped_data)
+        debug_dataframe(new_df, "NEWLY SCRAPED DATA")
+        
         if not new_df.empty:
             # Combine and deduplicate
-            combined_df = pd.concat([existing_df, new_df], ignore_index=True)
-            combined_df = combined_df.drop_duplicates(subset=['product_ref', 'channel'], keep='last')
+            if not existing_df.empty:
+                combined_df = pd.concat([existing_df, new_df], ignore_index=True)
+                combined_df = combined_df.drop_duplicates(subset=['product_ref', 'channel'], keep='last')
+                print(f"🔄 Combined existing {len(existing_df)} + new {len(new_df)} = total {len(combined_df)} records")
+            else:
+                combined_df = new_df
+                print(f"🆕 Using only new data: {len(combined_df)} records")
+            
+            debug_dataframe(combined_df, "COMBINED DATA BEFORE SAVE")
             
             # Save ONLY to S3
             success = save_parquet_to_s3(combined_df)
             if success:
                 print(f"💾 Saved {len(combined_df)} total records to S3")
-                new_count = len(combined_df) - len(existing_df)
+                new_count = len(combined_df) - len(existing_df) if not existing_df.empty else len(combined_df)
                 track_session_usage("scraping", True, f"Scraped {len(scraped_data)} messages")
                 return True, f"✅ Scraped {len(scraped_data)} messages from {channel_username}. Added {new_count} new records to database."
             else:
@@ -1030,7 +1126,6 @@ async def scrape_channel_7days_async(channel_username: str):
                     os.remove(USER_SESSION_FILE)
             except Exception as e:
                 print(f"⚠️ Error during cleanup: {e}")
-
 def scrape_channel_7days_sync(channel_username: str):
     """Synchronous wrapper for 7-day scraping"""
     try:
