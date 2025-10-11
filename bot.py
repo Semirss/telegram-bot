@@ -156,13 +156,12 @@ def save_json_to_s3(data, s3_key):
         return False
 
 # Parquet data functions - DIRECT S3 access (no local files)
-# Parquet data functions - DIRECT S3 access (no local files)
 def load_parquet_from_s3():
-    """Load parquet data directly from S3 using fastparquet"""
+    """Load parquet data directly from S3 without downloading files"""
     try:
         response = s3.get_object(Bucket=AWS_BUCKET_NAME, Key=f"data/{scraped_7d}")
-        df = pd.read_parquet(io.BytesIO(response['Body'].read()), engine='fastparquet')
-        print(f"✅ Loaded parquet from S3 using fastparquet: {scraped_7d}")
+        df = pd.read_parquet(io.BytesIO(response['Body'].read()))
+        print(f"✅ Loaded parquet from S3: {scraped_7d}")
         return df
     except s3.exceptions.NoSuchKey:
         print(f"⚠️ Parquet file {scraped_7d} not found in S3, returning empty DataFrame")
@@ -171,92 +170,73 @@ def load_parquet_from_s3():
         print(f"❌ Error loading parquet from S3: {e}")
         return pd.DataFrame()
 
-def save_parquet_to_s3(df, s3_key=None):
-    """Save parquet data to S3 using fastparquet engine"""
+def save_parquet_to_s3(df):
+    """Save parquet data to S3 ONLY using the proven approach from test script"""
     try:
-        print(f"\n💾 SAVE_PARQUET_TO_S3: Attempting to save {len(df)} records using fastparquet")
-        
         if df.empty:
             print("⚠️ DataFrame is empty, nothing to save")
             return False
-
-        # Use provided key or default
-        if s3_key is None:
-            s3_key = f"data/scraped_7d.parquet"
-
-        # Use fastparquet engine specifically
+            
+        print(f"💾 Attempting to save {len(df)} records to S3...")
+        
+        # Use in-memory buffer (same as test script)
         buffer = io.BytesIO()
         
-        print("🔄 Converting DataFrame to parquet using fastparquet...")
+        # Try different parquet engines (same as test script)
+        engines = ['pyarrow', 'fastparquet', 'auto']
+        success = False
         
-        try:
-            # Use fastparquet engine with compression
-            df.to_parquet(
-                buffer, 
-                engine='fastparquet', 
-                index=False,
-                compression='SNAPPY'  # fastparquet uses 'SNAPPY' instead of 'snappy'
-            )
-            print("✅ fastparquet conversion succeeded")
-        except Exception as e:
-            print(f"❌ fastparquet conversion failed: {e}")
-            
-            # Fallback: try without compression
+        for engine in engines:
             try:
-                print("🔄 Trying fastparquet without compression...")
-                buffer.seek(0)
-                buffer.truncate(0)
-                df.to_parquet(
-                    buffer, 
-                    engine='fastparquet', 
-                    index=False,
-                    compression=None
-                )
-                print("✅ fastparquet without compression succeeded")
-            except Exception as e2:
-                print(f"❌ fastparquet fallback also failed: {e2}")
-                return False
-
-        # Get buffer size
-        buffer_size = buffer.getbuffer().nbytes
-        print(f"📏 Parquet buffer size: {buffer_size} bytes")
+                print(f"🔄 Trying parquet engine: {engine}")
+                buffer.seek(0)  # Reset buffer
+                df.to_parquet(buffer, engine=engine, index=False)
+                success = True
+                print(f"✅ Success with engine: {engine}")
+                break
+            except Exception as e:
+                print(f"❌ Engine {engine} failed: {e}")
+                continue
         
-        if buffer_size == 0:
-            print("❌ Buffer is empty after conversion")
+        if not success:
+            print("❌ All parquet engines failed")
             return False
-
+        
         buffer.seek(0)
         
-        print(f"📤 Uploading to S3: {AWS_BUCKET_NAME}/{s3_key}")
+        # S3 key with proper path
+        s3_key = f"data/{scraped_7d}"
+        print(f"📤 Uploading to S3 bucket: {AWS_BUCKET_NAME}")
         
-        # Upload to S3
-        try:
-            s3.upload_fileobj(
-                buffer, 
-                AWS_BUCKET_NAME, 
-                s3_key,
-                ExtraArgs={'ContentType': 'application/octet-stream'}
-            )
-            print(f"✅ Successfully uploaded {len(df)} records to S3 using fastparquet")
-        except Exception as upload_error:
-            print(f"❌ Upload failed: {upload_error}")
-            return False
-
-        # Verify upload
+        # Upload to S3 (same as test script)
+        s3.upload_fileobj(
+            buffer, 
+            AWS_BUCKET_NAME, 
+            s3_key,
+            ExtraArgs={'ContentType': 'application/octet-stream'}
+        )
+        
+        print(f"✅ Successfully uploaded {len(df)} records to S3")
+        
+        # Verify upload (same as test script)
         try:
             response = s3.head_object(Bucket=AWS_BUCKET_NAME, Key=s3_key)
             file_size = response['ContentLength']
-            print(f"✅ Upload verified! File size: {file_size} bytes")
+            last_modified = response['LastModified']
+            print(f"✅ Upload verification successful!")
+            print(f"📏 File size: {file_size} bytes")
+            print(f"🕒 Last modified: {last_modified}")
             return True
-        except Exception as verify_error:
-            print(f"⚠️ Upload verification failed: {verify_error}")
+        except Exception as e:
+            print(f"⚠️ Upload verification failed: {e}")
             return False
             
     except Exception as e:
-        print(f"❌ Critical error in save_parquet_to_s3: {e}")
+        print(f"❌ Error saving to S3: {e}")
         import traceback
         print(f"🔍 Full traceback: {traceback.format_exc()}")
         return False
+
 def ensure_s3_structure():
     """Ensure the required S3 folder structure exists"""
     try:
@@ -896,29 +876,41 @@ def check_session_usage(update, context):
 # 7-day scraping function with PURE S3 integration
 # ======================
 async def scrape_channel_7days_async(channel_username: str):
-    """Scrape last 7 days of data - SIMPLIFIED VERSION"""
+    """Scrape last 7 days of data from a channel and store ONLY in S3"""
     telethon_client = None
     
     try:
-        print(f"🔍 Starting 7-day scrape for channel: {channel_username}")
+        # Use direct S3 access for parquet data
+        print("🔍 Loading parquet data directly from S3...")
         
         telethon_client = await get_telethon_client()
         if not telethon_client:
+            track_session_usage("scraping", False, "Failed to initialize client")
             return False, "❌ Could not establish connection for scraping."
         
-        # Resolve channels
+        print(f"🔍 Starting 7-day scrape for channel: {channel_username}")
+        
         try:
             entity = await telethon_client.get_entity(channel_username)
-            target_entity = await telethon_client.get_entity(FORWARD_CHANNEL)
-            print(f"✅ Channels resolved: {entity.title} -> {target_entity.title}")
-        except Exception as e:
-            return False, f"❌ Channel error: {e}"
+            print(f"✅ Channel found: {entity.title}")
+        except (ChannelInvalidError, UsernameInvalidError, UsernameNotOccupiedError) as e:
+            track_session_usage("scraping", False, f"Invalid channel: {str(e)}")
+            return False, f"❌ Channel {channel_username} is invalid or doesn't exist."
         
-        # Scrape logic (keep your existing scrape logic)
+        try:
+            target_entity = await telethon_client.get_entity(FORWARD_CHANNEL)
+            print(f"✅ Target channel resolved: {target_entity.title}")
+        except Exception as e:
+            track_session_usage("scraping", False, f"Target channel error: {str(e)}")
+            return False, f"❌ Could not resolve target channel: {str(e)}"
+        
         now = datetime.now(timezone.utc)
         cutoff = now - timedelta(days=7)
+        print(f"⏰ Scraping messages from last 7 days (since {cutoff})")
         
         source_messages = []
+        print(f"📡 Collecting messages from source channel: {channel_username}")
+        
         async for message in telethon_client.iter_messages(entity, limit=None):
             if not message.text:
                 continue
@@ -936,14 +928,18 @@ async def scrape_channel_7days_async(channel_username: str):
         scraped_data = []
         message_count = 0
         
+        print(f"🔍 Searching for matching messages in target channel...")
+        
         async for message in telethon_client.iter_messages(target_entity, limit=None):
             message_count += 1
+            if message_count % 50 == 0:
+                print(f"📊 Processed {message_count} messages in target channel...")
             if message.date < cutoff:
+                print(f"⏹️ Reached 7-day cutoff at message {message_count}")
                 break
             if not message.text:
                 continue
 
-            # Find matching source message
             matching_source = None
             for source_msg in source_messages:
                 if (source_msg['text'] in message.text or 
@@ -979,48 +975,48 @@ async def scrape_channel_7days_async(channel_username: str):
             }
             scraped_data.append(post_data)
         
-        print(f"📋 Found {len(scraped_data)} matching messages")
+        print(f"📋 Found {len(scraped_data)} matching messages in target channel")
         
-        if not scraped_data:
-            return False, f"📭 No matching messages found for {channel_username}."
-        
-        # Create new DataFrame
-        new_df = pd.DataFrame(scraped_data)
-        print(f"📊 New DataFrame created: {len(new_df)} records")
-        
-        # Load existing data
+        # Load existing data DIRECTLY FROM S3
         existing_df = load_parquet_from_s3()
-        print(f"📁 Existing data: {len(existing_df)} records")
+        if existing_df is None:
+            existing_df = pd.DataFrame()
         
-        # Combine data
-        if not existing_df.empty:
+        print(f"📁 Loaded existing data with {len(existing_df)} records from S3")
+        
+        new_df = pd.DataFrame(scraped_data)
+        if not new_df.empty:
+            # Combine and deduplicate
             combined_df = pd.concat([existing_df, new_df], ignore_index=True)
             combined_df = combined_df.drop_duplicates(subset=['product_ref', 'channel'], keep='last')
-            print(f"🔄 Combined: {len(existing_df)} + {len(new_df)} = {len(combined_df)} records")
+            
+            # Save ONLY to S3
+            success = save_parquet_to_s3(combined_df)
+            if success:
+                print(f"💾 Saved {len(combined_df)} total records to S3")
+                new_count = len(combined_df) - len(existing_df)
+                track_session_usage("scraping", True, f"Scraped {len(scraped_data)} messages")
+                return True, f"✅ Scraped {len(scraped_data)} messages from {channel_username}. Added {new_count} new records to database."
+            else:
+                track_session_usage("scraping", False, "S3 save failed")
+                return False, f"❌ Failed to save scraped data for {channel_username} to S3."
         else:
-            combined_df = new_df
-            print(f"🆕 Using only new data: {len(combined_df)} records")
-        
-        # SIMPLIFIED SAVE - just save the new data temporarily to test
-        print("💾 Attempting to save to S3...")
-        success = save_parquet_to_s3(combined_df)
-        
-        if success:
-            new_count = len(combined_df) - len(existing_df) if not existing_df.empty else len(combined_df)
-            return True, f"✅ Scraped {len(scraped_data)} messages from {channel_username}. Added {new_count} new records to database."
-        else:
-            return False, f"❌ Failed to save scraped data for {channel_username} to S3."
+            track_session_usage("scraping", True, "No new messages found")
+            return False, f"📭 No matching messages found in target channel for {channel_username} in the last 7 days."
             
     except Exception as e:
-        print(f"❌ Scraping error: {e}")
+        error_msg = f"Scraping error: {str(e)}"
+        print(f"❌ {error_msg}")
         import traceback
         print(f"🔍 Full traceback: {traceback.format_exc()}")
+        track_session_usage("scraping", False, error_msg)
         return False, f"❌ Scraping error: {str(e)}"
     finally:
         if telethon_client:
             try:
                 await telethon_client.disconnect()
-                # Upload session file to S3
+                # Upload session file to S3 after operations
+                print("📤 Uploading updated session file to S3...")
                 if os.path.exists(USER_SESSION_FILE):
                     with open(USER_SESSION_FILE, 'rb') as f:
                         s3.put_object(
@@ -1028,10 +1024,12 @@ async def scrape_channel_7days_async(channel_username: str):
                             Key=f"sessions/{USER_SESSION_FILE}",
                             Body=f.read()
                         )
-                    print(f"✅ Session file uploaded to S3")
+                    print(f"✅ Session file uploaded to S3: {USER_SESSION_FILE}")
+                    # Clean up temporary file
                     os.remove(USER_SESSION_FILE)
             except Exception as e:
-                print(f"⚠️ Cleanup error: {e}")
+                print(f"⚠️ Error during cleanup: {e}")
+
 def scrape_channel_7days_sync(channel_username: str):
     """Synchronous wrapper for 7-day scraping"""
     try:
@@ -1428,8 +1426,10 @@ def code(update, context):
 # ======================
 def main():
     from telegram.utils.request import Request
+    request = Request(connect_timeout=30, read_timeout=30, con_pool_size=8)
     updater = Updater(BOT_TOKEN, use_context=True)
     dp = updater.dispatcher
+    request=request
     dp.add_handler(CommandHandler("start", start))
     dp.add_handler(CommandHandler("code", code))
     dp.add_handler(CommandHandler("addchannel", add_channel))
