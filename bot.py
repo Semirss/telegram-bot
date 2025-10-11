@@ -171,192 +171,68 @@ def load_parquet_from_s3():
         return pd.DataFrame()
 
 def save_parquet_to_s3(df, s3_key=None):
-    """Save parquet data to S3 ONLY using the proven approach from test script"""
+    """Save parquet data to S3 - SIMPLIFIED GUARANTEED VERSION"""
     try:
-        # Enhanced DataFrame debugging
-        print(f"\n🔍 DEBUG SAVE_PARQUET_TO_S3:")
-        print(f"📊 DataFrame type: {type(df)}")
-        print(f"📊 DataFrame shape: {df.shape if hasattr(df, 'shape') else 'No shape'}")
-        print(f"📝 DataFrame columns: {df.columns.tolist() if hasattr(df, 'columns') else 'No columns'}")
+        print(f"\n💾 SAVE_PARQUET_TO_S3: Attempting to save {len(df)} records")
         
         if df.empty:
             print("⚠️ DataFrame is empty, nothing to save")
             return False
-            
-        print(f"💾 Attempting to save {len(df)} records to S3...")
-        
-        # Check for problematic data types
-        print(f"🔍 Checking data types...")
-        for col in df.columns:
-            dtype = df[col].dtype
-            null_count = df[col].isnull().sum()
-            print(f"   {col}: {dtype} ({null_count} nulls)")
-        
-        # Use in-memory buffer
-        buffer = io.BytesIO()
-        
-        # Try different parquet engines with enhanced error handling and timeouts
-        engines = [
-            ('pyarrow', {'engine': 'pyarrow', 'index': False, 'compression': 'snappy'}),
-            ('fastparquet', {'engine': 'fastparquet', 'index': False, 'compression': 'SNAPPY'}),
-            ('pyarrow_no_compression', {'engine': 'pyarrow', 'index': False, 'compression': None}),
-            ('auto', {'engine': 'auto', 'index': False})
-        ]
-        
-        success = False
-        last_error = None
-        used_engine = None
-        
-        for engine_name, engine_params in engines:
-            try:
-                print(f"🔄 Trying parquet engine: {engine_name}")
-                buffer.seek(0)
-                buffer.truncate(0)  # Clear buffer completely
-                
-                # Use threading with timeout to prevent hanging
-                import threading
-                
-                def save_with_timeout():
-                    try:
-                        df.to_parquet(buffer, **engine_params)
-                        return True, None
-                    except Exception as e:
-                        return False, e
-                
-                result = [None]
-                exception = [None]
-                
-                def thread_target():
-                    try:
-                        df.to_parquet(buffer, **engine_params)
-                        result[0] = True
-                    except Exception as e:
-                        exception[0] = e
-                        result[0] = False
-                
-                thread = threading.Thread(target=thread_target)
-                thread.daemon = True
-                thread.start()
-                thread.join(timeout=30)  # 30 second timeout
-                
-                if thread.is_alive():
-                    print(f"❌ Engine {engine_name} timed out after 30 seconds")
-                    last_error = "Engine timed out"
-                    continue
-                
-                if not result[0]:
-                    if exception[0]:
-                        last_error = exception[0]
-                        print(f"❌ Engine {engine_name} failed: {str(exception[0])}")
-                    else:
-                        last_error = "Unknown error in thread"
-                        print(f"❌ Engine {engine_name} failed: Unknown error")
-                    continue
-                
-                # Verify the buffer has data
-                buffer_size = buffer.getbuffer().nbytes
-                if buffer_size == 0:
-                    print(f"❌ Engine {engine_name} produced empty buffer")
-                    last_error = "Empty buffer"
-                    continue
-                
-                print(f"✅ Success with engine: {engine_name} - Buffer size: {buffer_size} bytes")
-                success = True
-                used_engine = engine_name
-                break
-                
-            except Exception as e:
-                last_error = e
-                print(f"❌ Engine {engine_name} failed: {str(e)}")
-                continue
-        
-        if not success:
-            print(f"❌ All parquet engines failed. Last error: {last_error}")
-            
-            # Fallback: Save as CSV instead
-            print("🔄 Trying fallback: Saving as CSV to S3...")
-            try:
-                if s3_key is None:
-                    s3_key = f"data/scraped_7d.csv"
-                else:
-                    s3_key = s3_key.replace('.parquet', '.csv')
-                
-                csv_buffer = io.StringIO()
-                df.to_csv(csv_buffer, index=False)
-                csv_buffer.seek(0)
-                
-                s3.upload_fileobj(
-                    io.BytesIO(csv_buffer.getvalue().encode('utf-8')),
-                    AWS_BUCKET_NAME,
-                    s3_key,
-                    ExtraArgs={'ContentType': 'text/csv'}
-                )
-                print(f"✅ Fallback successful: Saved {len(df)} records as CSV to S3")
-                return True
-            except Exception as csv_error:
-                print(f"❌ CSV fallback also failed: {csv_error}")
-                return False
-        
-        buffer.seek(0)
-        
+
         # Use provided key or default
         if s3_key is None:
             s3_key = f"data/scraped_7d.parquet"
+
+        # SIMPLIFIED APPROACH: Use pandas with default engine and save to buffer
+        buffer = io.BytesIO()
         
-        print(f"📤 Uploading to S3 bucket: {AWS_BUCKET_NAME}, key: {s3_key}")
-        print(f"🔧 Using engine: {used_engine}")
+        print("🔄 Converting DataFrame to parquet...")
         
-        # Upload to S3 with retry logic
-        max_upload_retries = 2
-        for attempt in range(max_upload_retries):
-            try:
-                upload_buffer = io.BytesIO(buffer.getvalue())  # Create fresh buffer for upload
-                s3.upload_fileobj(
-                    upload_buffer, 
-                    AWS_BUCKET_NAME, 
-                    s3_key,
-                    ExtraArgs={
-                        'ContentType': 'application/octet-stream',
-                        'Metadata': {
-                            'records': str(len(df)),
-                            'channels': str(df['channel'].nunique() if 'channel' in df.columns else 0),
-                            'saved_at': datetime.now().isoformat(),
-                            'engine_used': used_engine or 'unknown'
-                        }
-                    }
-                )
-                print(f"✅ Successfully uploaded {len(df)} records to S3")
-                break
-                
-            except Exception as upload_error:
-                if attempt < max_upload_retries - 1:
-                    print(f"⚠️ Upload attempt {attempt + 1} failed: {upload_error}. Retrying...")
-                    buffer.seek(0)
-                    continue
-                else:
-                    print(f"❌ All upload attempts failed: {upload_error}")
-                    return False
+        # Method 1: Try simple pandas to_parquet with no extra parameters
+        try:
+            df.to_parquet(buffer, index=False)
+            print("✅ pandas to_parquet succeeded")
+        except Exception as e:
+            print(f"❌ pandas to_parquet failed: {e}")
+            return False
+
+        # Get buffer size
+        buffer_size = buffer.getbuffer().nbytes
+        print(f"📏 Parquet buffer size: {buffer_size} bytes")
         
-        # Enhanced verification
+        if buffer_size == 0:
+            print("❌ Buffer is empty after conversion")
+            return False
+
+        buffer.seek(0)
+        
+        print(f"📤 Uploading to S3: {AWS_BUCKET_NAME}/{s3_key}")
+        
+        # Upload to S3
+        try:
+            s3.upload_fileobj(
+                buffer, 
+                AWS_BUCKET_NAME, 
+                s3_key,
+                ExtraArgs={'ContentType': 'application/octet-stream'}
+            )
+            print(f"✅ Successfully uploaded {len(df)} records to S3")
+        except Exception as upload_error:
+            print(f"❌ Upload failed: {upload_error}")
+            return False
+
+        # Verify upload
         try:
             response = s3.head_object(Bucket=AWS_BUCKET_NAME, Key=s3_key)
             file_size = response['ContentLength']
-            last_modified = response['LastModified']
-            metadata = response.get('Metadata', {})
-            
-            print(f"✅ Upload verification successful!")
-            print(f"📏 File size: {file_size} bytes")
-            print(f"🕒 Last modified: {last_modified}")
-            print(f"📋 Metadata: {metadata}")
-            
+            print(f"✅ Upload verified! File size: {file_size} bytes")
             return True
-            
-        except Exception as e:
-            print(f"⚠️ Upload verification failed: {e}")
+        except Exception as verify_error:
+            print(f"⚠️ Upload verification failed: {verify_error}")
             return False
             
     except Exception as e:
-        print(f"❌ Error saving to S3: {e}")
+        print(f"❌ Critical error in save_parquet_to_s3: {e}")
         import traceback
         print(f"🔍 Full traceback: {traceback.format_exc()}")
         return False
@@ -999,56 +875,29 @@ def check_session_usage(update, context):
 # 7-day scraping function with PURE S3 integration
 # ======================
 async def scrape_channel_7days_async(channel_username: str):
-    """Scrape last 7 days of data from a channel and store ONLY in S3"""
+    """Scrape last 7 days of data - SIMPLIFIED VERSION"""
     telethon_client = None
     
     try:
         print(f"🔍 Starting 7-day scrape for channel: {channel_username}")
         
-        # Enhanced debugging for DataFrame
-        def debug_dataframe(df, operation):
-            print(f"\n🔍 DEBUG {operation}:")
-            print(f"📊 Shape: {df.shape}")
-            print(f"📝 Columns: {df.columns.tolist() if hasattr(df, 'columns') else 'No columns'}")
-            if not df.empty:
-                print(f"💭 Data types:\n{df.dtypes}")
-                print(f"📋 First 2 rows sample:")
-                for i, row in df.head(2).iterrows():
-                    print(f"   Row {i}: {dict(row)}")
-            else:
-                print("❌ DataFrame is EMPTY")
-        
         telethon_client = await get_telethon_client()
         if not telethon_client:
-            track_session_usage("scraping", False, "Failed to initialize client")
             return False, "❌ Could not establish connection for scraping."
         
-        print(f"🔍 Loading existing parquet data directly from S3...")
-        existing_df = load_parquet_from_s3()
-        debug_dataframe(existing_df, "EXISTING DATA")
-        
-        print(f"🔍 Resolving channel entity: {channel_username}")
+        # Resolve channels
         try:
             entity = await telethon_client.get_entity(channel_username)
-            print(f"✅ Channel found: {entity.title}")
-        except (ChannelInvalidError, UsernameInvalidError, UsernameNotOccupiedError) as e:
-            track_session_usage("scraping", False, f"Invalid channel: {str(e)}")
-            return False, f"❌ Channel {channel_username} is invalid or doesn't exist."
-        
-        try:
             target_entity = await telethon_client.get_entity(FORWARD_CHANNEL)
-            print(f"✅ Target channel resolved: {target_entity.title}")
+            print(f"✅ Channels resolved: {entity.title} -> {target_entity.title}")
         except Exception as e:
-            track_session_usage("scraping", False, f"Target channel error: {str(e)}")
-            return False, f"❌ Could not resolve target channel: {str(e)}"
+            return False, f"❌ Channel error: {e}"
         
+        # Scrape logic (keep your existing scrape logic)
         now = datetime.now(timezone.utc)
         cutoff = now - timedelta(days=7)
-        print(f"⏰ Scraping messages from last 7 days (since {cutoff})")
         
         source_messages = []
-        print(f"📡 Collecting messages from source channel: {channel_username}")
-        
         async for message in telethon_client.iter_messages(entity, limit=None):
             if not message.text:
                 continue
@@ -1066,18 +915,14 @@ async def scrape_channel_7days_async(channel_username: str):
         scraped_data = []
         message_count = 0
         
-        print(f"🔍 Searching for matching messages in target channel...")
-        
         async for message in telethon_client.iter_messages(target_entity, limit=None):
             message_count += 1
-            if message_count % 50 == 0:
-                print(f"📊 Processed {message_count} messages in target channel...")
             if message.date < cutoff:
-                print(f"⏹️ Reached 7-day cutoff at message {message_count}")
                 break
             if not message.text:
                 continue
 
+            # Find matching source message
             matching_source = None
             for source_msg in source_messages:
                 if (source_msg['text'] in message.text or 
@@ -1113,50 +958,48 @@ async def scrape_channel_7days_async(channel_username: str):
             }
             scraped_data.append(post_data)
         
-        print(f"📋 Found {len(scraped_data)} matching messages in target channel")
+        print(f"📋 Found {len(scraped_data)} matching messages")
         
+        if not scraped_data:
+            return False, f"📭 No matching messages found for {channel_username}."
+        
+        # Create new DataFrame
         new_df = pd.DataFrame(scraped_data)
-        debug_dataframe(new_df, "NEWLY SCRAPED DATA")
+        print(f"📊 New DataFrame created: {len(new_df)} records")
         
-        if not new_df.empty:
-            # Combine and deduplicate
-            if not existing_df.empty:
-                combined_df = pd.concat([existing_df, new_df], ignore_index=True)
-                combined_df = combined_df.drop_duplicates(subset=['product_ref', 'channel'], keep='last')
-                print(f"🔄 Combined existing {len(existing_df)} + new {len(new_df)} = total {len(combined_df)} records")
-            else:
-                combined_df = new_df
-                print(f"🆕 Using only new data: {len(combined_df)} records")
-            
-            debug_dataframe(combined_df, "COMBINED DATA BEFORE SAVE")
-            
-            # Save ONLY to S3
-            success = save_parquet_to_s3(combined_df)
-            if success:
-                print(f"💾 Saved {len(combined_df)} total records to S3")
-                new_count = len(combined_df) - len(existing_df) if not existing_df.empty else len(combined_df)
-                track_session_usage("scraping", True, f"Scraped {len(scraped_data)} messages")
-                return True, f"✅ Scraped {len(scraped_data)} messages from {channel_username}. Added {new_count} new records to database."
-            else:
-                track_session_usage("scraping", False, "S3 save failed")
-                return False, f"❌ Failed to save scraped data for {channel_username} to S3."
+        # Load existing data
+        existing_df = load_parquet_from_s3()
+        print(f"📁 Existing data: {len(existing_df)} records")
+        
+        # Combine data
+        if not existing_df.empty:
+            combined_df = pd.concat([existing_df, new_df], ignore_index=True)
+            combined_df = combined_df.drop_duplicates(subset=['product_ref', 'channel'], keep='last')
+            print(f"🔄 Combined: {len(existing_df)} + {len(new_df)} = {len(combined_df)} records")
         else:
-            track_session_usage("scraping", True, "No new messages found")
-            return False, f"📭 No matching messages found in target channel for {channel_username} in the last 7 days."
+            combined_df = new_df
+            print(f"🆕 Using only new data: {len(combined_df)} records")
+        
+        # SIMPLIFIED SAVE - just save the new data temporarily to test
+        print("💾 Attempting to save to S3...")
+        success = save_parquet_to_s3(combined_df)
+        
+        if success:
+            new_count = len(combined_df) - len(existing_df) if not existing_df.empty else len(combined_df)
+            return True, f"✅ Scraped {len(scraped_data)} messages from {channel_username}. Added {new_count} new records to database."
+        else:
+            return False, f"❌ Failed to save scraped data for {channel_username} to S3."
             
     except Exception as e:
-        error_msg = f"Scraping error: {str(e)}"
-        print(f"❌ {error_msg}")
+        print(f"❌ Scraping error: {e}")
         import traceback
         print(f"🔍 Full traceback: {traceback.format_exc()}")
-        track_session_usage("scraping", False, error_msg)
         return False, f"❌ Scraping error: {str(e)}"
     finally:
         if telethon_client:
             try:
                 await telethon_client.disconnect()
-                # Upload session file to S3 after operations
-                print("📤 Uploading updated session file to S3...")
+                # Upload session file to S3
                 if os.path.exists(USER_SESSION_FILE):
                     with open(USER_SESSION_FILE, 'rb') as f:
                         s3.put_object(
@@ -1164,11 +1007,10 @@ async def scrape_channel_7days_async(channel_username: str):
                             Key=f"sessions/{USER_SESSION_FILE}",
                             Body=f.read()
                         )
-                    print(f"✅ Session file uploaded to S3: {USER_SESSION_FILE}")
-                    # Clean up temporary file
+                    print(f"✅ Session file uploaded to S3")
                     os.remove(USER_SESSION_FILE)
             except Exception as e:
-                print(f"⚠️ Error during cleanup: {e}")
+                print(f"⚠️ Cleanup error: {e}")
 def scrape_channel_7days_sync(channel_username: str):
     """Synchronous wrapper for 7-day scraping"""
     try:
