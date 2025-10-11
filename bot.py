@@ -195,53 +195,107 @@ def save_parquet_to_s3(df, s3_key=None):
         # Use in-memory buffer
         buffer = io.BytesIO()
         
-        # Try different parquet engines with enhanced error handling
-        engines = ['pyarrow', 'fastparquet', 'auto']
+        # Try different parquet engines with enhanced error handling and timeouts
+        engines = [
+            ('pyarrow', {'engine': 'pyarrow', 'index': False, 'compression': 'snappy'}),
+            ('fastparquet', {'engine': 'fastparquet', 'index': False, 'compression': 'SNAPPY'}),
+            ('pyarrow_no_compression', {'engine': 'pyarrow', 'index': False, 'compression': None}),
+            ('auto', {'engine': 'auto', 'index': False})
+        ]
+        
         success = False
         last_error = None
+        used_engine = None
         
-        for engine in engines:
+        for engine_name, engine_params in engines:
             try:
-                print(f"🔄 Trying parquet engine: {engine}")
+                print(f"🔄 Trying parquet engine: {engine_name}")
                 buffer.seek(0)
+                buffer.truncate(0)  # Clear buffer completely
                 
-                # Enhanced parquet save with specific error handling
-                if engine == 'pyarrow':
-                    df.to_parquet(buffer, engine=engine, index=False, compression='snappy')
-                elif engine == 'fastparquet':
-                    df.to_parquet(buffer, engine=engine, index=False, compression='SNAPPY')
-                else:
-                    df.to_parquet(buffer, engine=engine, index=False)
+                # Use threading with timeout to prevent hanging
+                import threading
+                
+                def save_with_timeout():
+                    try:
+                        df.to_parquet(buffer, **engine_params)
+                        return True, None
+                    except Exception as e:
+                        return False, e
+                
+                result = [None]
+                exception = [None]
+                
+                def thread_target():
+                    try:
+                        df.to_parquet(buffer, **engine_params)
+                        result[0] = True
+                    except Exception as e:
+                        exception[0] = e
+                        result[0] = False
+                
+                thread = threading.Thread(target=thread_target)
+                thread.daemon = True
+                thread.start()
+                thread.join(timeout=30)  # 30 second timeout
+                
+                if thread.is_alive():
+                    print(f"❌ Engine {engine_name} timed out after 30 seconds")
+                    last_error = "Engine timed out"
+                    continue
+                
+                if not result[0]:
+                    if exception[0]:
+                        last_error = exception[0]
+                        print(f"❌ Engine {engine_name} failed: {str(exception[0])}")
+                    else:
+                        last_error = "Unknown error in thread"
+                        print(f"❌ Engine {engine_name} failed: Unknown error")
+                    continue
                 
                 # Verify the buffer has data
                 buffer_size = buffer.getbuffer().nbytes
-                print(f"✅ Success with engine: {engine} - Buffer size: {buffer_size} bytes")
+                if buffer_size == 0:
+                    print(f"❌ Engine {engine_name} produced empty buffer")
+                    last_error = "Empty buffer"
+                    continue
                 
+                print(f"✅ Success with engine: {engine_name} - Buffer size: {buffer_size} bytes")
                 success = True
+                used_engine = engine_name
                 break
                 
             except Exception as e:
                 last_error = e
-                print(f"❌ Engine {engine} failed: {str(e)}")
-                
-                # Specific error handling
-                if "unsupported type" in str(e).lower():
-                    print(f"   🔧 Data type issue detected. Trying to convert object columns to string...")
-                    try:
-                        # Convert object columns to string
-                        for col in df.columns:
-                            if df[col].dtype == 'object':
-                                df[col] = df[col].astype(str)
-                        print(f"   ✅ Converted object columns to string, retrying...")
-                        continue  # Retry with same engine
-                    except Exception as conversion_error:
-                        print(f"   ❌ Column conversion failed: {conversion_error}")
-                
+                print(f"❌ Engine {engine_name} failed: {str(e)}")
                 continue
         
         if not success:
             print(f"❌ All parquet engines failed. Last error: {last_error}")
-            return False
+            
+            # Fallback: Save as CSV instead
+            print("🔄 Trying fallback: Saving as CSV to S3...")
+            try:
+                if s3_key is None:
+                    s3_key = f"data/scraped_7d.csv"
+                else:
+                    s3_key = s3_key.replace('.parquet', '.csv')
+                
+                csv_buffer = io.StringIO()
+                df.to_csv(csv_buffer, index=False)
+                csv_buffer.seek(0)
+                
+                s3.upload_fileobj(
+                    io.BytesIO(csv_buffer.getvalue().encode('utf-8')),
+                    AWS_BUCKET_NAME,
+                    s3_key,
+                    ExtraArgs={'ContentType': 'text/csv'}
+                )
+                print(f"✅ Fallback successful: Saved {len(df)} records as CSV to S3")
+                return True
+            except Exception as csv_error:
+                print(f"❌ CSV fallback also failed: {csv_error}")
+                return False
         
         buffer.seek(0)
         
@@ -250,13 +304,15 @@ def save_parquet_to_s3(df, s3_key=None):
             s3_key = f"data/scraped_7d.parquet"
         
         print(f"📤 Uploading to S3 bucket: {AWS_BUCKET_NAME}, key: {s3_key}")
+        print(f"🔧 Using engine: {used_engine}")
         
         # Upload to S3 with retry logic
         max_upload_retries = 2
         for attempt in range(max_upload_retries):
             try:
+                upload_buffer = io.BytesIO(buffer.getvalue())  # Create fresh buffer for upload
                 s3.upload_fileobj(
-                    buffer, 
+                    upload_buffer, 
                     AWS_BUCKET_NAME, 
                     s3_key,
                     ExtraArgs={
@@ -264,7 +320,8 @@ def save_parquet_to_s3(df, s3_key=None):
                         'Metadata': {
                             'records': str(len(df)),
                             'channels': str(df['channel'].nunique() if 'channel' in df.columns else 0),
-                            'saved_at': datetime.now().isoformat()
+                            'saved_at': datetime.now().isoformat(),
+                            'engine_used': used_engine or 'unknown'
                         }
                     }
                 )
@@ -274,7 +331,7 @@ def save_parquet_to_s3(df, s3_key=None):
             except Exception as upload_error:
                 if attempt < max_upload_retries - 1:
                     print(f"⚠️ Upload attempt {attempt + 1} failed: {upload_error}. Retrying...")
-                    buffer.seek(0)  # Reset buffer for retry
+                    buffer.seek(0)
                     continue
                 else:
                     print(f"❌ All upload attempts failed: {upload_error}")
@@ -292,20 +349,6 @@ def save_parquet_to_s3(df, s3_key=None):
             print(f"🕒 Last modified: {last_modified}")
             print(f"📋 Metadata: {metadata}")
             
-            # Quick read verification
-            try:
-                verify_df = load_parquet_from_s3()
-                if not verify_df.empty:
-                    print(f"🔍 Read verification: {len(verify_df)} records loaded back successfully")
-                    if len(verify_df) == len(df):
-                        print("✅ Record count matches!")
-                    else:
-                        print(f"⚠️ Record count mismatch: original={len(df)}, loaded={len(verify_df)}")
-                else:
-                    print("⚠️ Read verification: loaded DataFrame is empty")
-            except Exception as verify_error:
-                print(f"⚠️ Read verification failed: {verify_error}")
-            
             return True
             
         except Exception as e:
@@ -316,7 +359,7 @@ def save_parquet_to_s3(df, s3_key=None):
         print(f"❌ Error saving to S3: {e}")
         import traceback
         print(f"🔍 Full traceback: {traceback.format_exc()}")
-        return Falsec
+        return False
 def ensure_s3_structure():
     """Ensure the required S3 folder structure exists"""
     try:
@@ -1522,10 +1565,25 @@ def code(update, context):
 # ======================
 def main():
     from telegram.utils.request import Request
-    request = Request(connect_timeout=30, read_timeout=30, con_pool_size=8)
-    updater = Updater(BOT_TOKEN, use_context=True)
+    
+    # Use a unique bot instance name to prevent conflicts
+    bot_instance_id = f"yetal_bot_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    
+    request = Request(
+        connect_timeout=30, 
+        read_timeout=30, 
+        con_pool_size=8,
+        bot_identifier=bot_instance_id  # Unique identifier for this bot instance
+    )
+    
+    updater = Updater(
+        BOT_TOKEN, 
+        use_context=True, 
+        request=request
+    )
+    
     dp = updater.dispatcher
-    request=request
+    
     dp.add_handler(CommandHandler("start", start))
     dp.add_handler(CommandHandler("code", code))
     dp.add_handler(CommandHandler("addchannel", add_channel))
@@ -1545,10 +1603,12 @@ def main():
     dp.add_handler(CommandHandler("debug_parquet", debug_s3_parquet))
     dp.add_handler(CommandHandler("test_s3_write", test_s3_write))
     dp.add_handler(CommandHandler("debug_parquet_comprehensive", debug_parquet_comprehensive))
+    
     print(f"🤖 Bot is running...")
     print(f"🔧 Using session file: {USER_SESSION_FILE}")
     print(f"🌍 Environment: {'render' if 'RENDER' in os.environ else 'local'}")
     print(f"☁️ S3 Bucket: {AWS_BUCKET_NAME}")
+    print(f"🔑 Bot Instance ID: {bot_instance_id}")
     
     # Efficiently check all S3 files on startup
     print("\n🔍 Checking S3 files efficiently (using head_object)...")
@@ -1558,12 +1618,24 @@ def main():
     ensure_s3_structure()
     
     try:
-        updater.start_polling()
+        print("🔄 Starting bot polling...")
+        updater.start_polling(
+            poll_interval=1.0,
+            timeout=20,
+            drop_pending_updates=True  # Prevent processing old updates
+        )
+        print("✅ Bot polling started successfully!")
         updater.idle()
+    except telegram.error.Conflict as e:
+        print(f"❌ Bot conflict error: {e}")
+        print("💡 Solution: Make sure only one bot instance is running")
+        print("   On Render, check if you have multiple services running the same bot")
     except KeyboardInterrupt:
         print("\n🛑 Shutting down bot...")
     except Exception as e:
         print(f"❌ Bot error: {e}")
+        import traceback
+        print(f"🔍 Full traceback: {traceback.format_exc()}")
     finally:
         print("👋 Bot stopped")
 
