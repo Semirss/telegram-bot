@@ -1565,25 +1565,8 @@ def code(update, context):
 # ======================
 def main():
     from telegram.utils.request import Request
-    
-    # Use a unique bot instance name to prevent conflicts
-    bot_instance_id = f"yetal_bot_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-    
-    request = Request(
-        connect_timeout=30, 
-        read_timeout=30, 
-        con_pool_size=8,
-        bot_identifier=bot_instance_id  # Unique identifier for this bot instance
-    )
-    
-    updater = Updater(
-        BOT_TOKEN, 
-        use_context=True, 
-        request=request
-    )
-    
+    updater = Updater(BOT_TOKEN, use_context=True)
     dp = updater.dispatcher
-    
     dp.add_handler(CommandHandler("start", start))
     dp.add_handler(CommandHandler("code", code))
     dp.add_handler(CommandHandler("addchannel", add_channel))
@@ -1603,12 +1586,10 @@ def main():
     dp.add_handler(CommandHandler("debug_parquet", debug_s3_parquet))
     dp.add_handler(CommandHandler("test_s3_write", test_s3_write))
     dp.add_handler(CommandHandler("debug_parquet_comprehensive", debug_parquet_comprehensive))
-    
     print(f"🤖 Bot is running...")
     print(f"🔧 Using session file: {USER_SESSION_FILE}")
     print(f"🌍 Environment: {'render' if 'RENDER' in os.environ else 'local'}")
     print(f"☁️ S3 Bucket: {AWS_BUCKET_NAME}")
-    print(f"🔑 Bot Instance ID: {bot_instance_id}")
     
     # Efficiently check all S3 files on startup
     print("\n🔍 Checking S3 files efficiently (using head_object)...")
@@ -1618,24 +1599,12 @@ def main():
     ensure_s3_structure()
     
     try:
-        print("🔄 Starting bot polling...")
-        updater.start_polling(
-            poll_interval=1.0,
-            timeout=20,
-            drop_pending_updates=True  # Prevent processing old updates
-        )
-        print("✅ Bot polling started successfully!")
+        updater.start_polling()
         updater.idle()
-    except telegram.error.Conflict as e:
-        print(f"❌ Bot conflict error: {e}")
-        print("💡 Solution: Make sure only one bot instance is running")
-        print("   On Render, check if you have multiple services running the same bot")
     except KeyboardInterrupt:
         print("\n🛑 Shutting down bot...")
     except Exception as e:
         print(f"❌ Bot error: {e}")
-        import traceback
-        print(f"🔍 Full traceback: {traceback.format_exc()}")
     finally:
         print("👋 Bot stopped")
 
