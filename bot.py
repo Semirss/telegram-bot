@@ -156,12 +156,13 @@ def save_json_to_s3(data, s3_key):
         return False
 
 # Parquet data functions - DIRECT S3 access (no local files)
+# Parquet data functions - DIRECT S3 access (no local files)
 def load_parquet_from_s3():
-    """Load parquet data directly from S3 without downloading files"""
+    """Load parquet data directly from S3 using fastparquet"""
     try:
         response = s3.get_object(Bucket=AWS_BUCKET_NAME, Key=f"data/{scraped_7d}")
-        df = pd.read_parquet(io.BytesIO(response['Body'].read()))
-        print(f"✅ Loaded parquet from S3: {scraped_7d}")
+        df = pd.read_parquet(io.BytesIO(response['Body'].read()), engine='fastparquet')
+        print(f"✅ Loaded parquet from S3 using fastparquet: {scraped_7d}")
         return df
     except s3.exceptions.NoSuchKey:
         print(f"⚠️ Parquet file {scraped_7d} not found in S3, returning empty DataFrame")
@@ -171,9 +172,9 @@ def load_parquet_from_s3():
         return pd.DataFrame()
 
 def save_parquet_to_s3(df, s3_key=None):
-    """Save parquet data to S3 - SIMPLIFIED GUARANTEED VERSION"""
+    """Save parquet data to S3 using fastparquet engine"""
     try:
-        print(f"\n💾 SAVE_PARQUET_TO_S3: Attempting to save {len(df)} records")
+        print(f"\n💾 SAVE_PARQUET_TO_S3: Attempting to save {len(df)} records using fastparquet")
         
         if df.empty:
             print("⚠️ DataFrame is empty, nothing to save")
@@ -183,18 +184,38 @@ def save_parquet_to_s3(df, s3_key=None):
         if s3_key is None:
             s3_key = f"data/scraped_7d.parquet"
 
-        # SIMPLIFIED APPROACH: Use pandas with default engine and save to buffer
+        # Use fastparquet engine specifically
         buffer = io.BytesIO()
         
-        print("🔄 Converting DataFrame to parquet...")
+        print("🔄 Converting DataFrame to parquet using fastparquet...")
         
-        # Method 1: Try simple pandas to_parquet with no extra parameters
         try:
-            df.to_parquet(buffer, index=False)
-            print("✅ pandas to_parquet succeeded")
+            # Use fastparquet engine with compression
+            df.to_parquet(
+                buffer, 
+                engine='fastparquet', 
+                index=False,
+                compression='SNAPPY'  # fastparquet uses 'SNAPPY' instead of 'snappy'
+            )
+            print("✅ fastparquet conversion succeeded")
         except Exception as e:
-            print(f"❌ pandas to_parquet failed: {e}")
-            return False
+            print(f"❌ fastparquet conversion failed: {e}")
+            
+            # Fallback: try without compression
+            try:
+                print("🔄 Trying fastparquet without compression...")
+                buffer.seek(0)
+                buffer.truncate(0)
+                df.to_parquet(
+                    buffer, 
+                    engine='fastparquet', 
+                    index=False,
+                    compression=None
+                )
+                print("✅ fastparquet without compression succeeded")
+            except Exception as e2:
+                print(f"❌ fastparquet fallback also failed: {e2}")
+                return False
 
         # Get buffer size
         buffer_size = buffer.getbuffer().nbytes
@@ -216,7 +237,7 @@ def save_parquet_to_s3(df, s3_key=None):
                 s3_key,
                 ExtraArgs={'ContentType': 'application/octet-stream'}
             )
-            print(f"✅ Successfully uploaded {len(df)} records to S3")
+            print(f"✅ Successfully uploaded {len(df)} records to S3 using fastparquet")
         except Exception as upload_error:
             print(f"❌ Upload failed: {upload_error}")
             return False
