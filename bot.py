@@ -1070,19 +1070,21 @@ def add_channel(update, context):
             parse_mode="HTML",
         )
 
-        # Run operations sequentially
+        # Run operations in CORRECT ORDER
         def run_operations():
             try:
-                # First scraping
-                update.message.reply_text(f"⏳ Starting 7-day data scraping from {username}...")
-                success, result_msg = scrape_channel_7days_sync(username)
-                context.bot.send_message(update.effective_chat.id, text=result_msg, parse_mode="HTML")
-                
-                # Then forwarding with delay
-                import time
-                time.sleep(2)
+                # FIRST: Forward messages to target channel
                 update.message.reply_text(f"⏳ Forwarding last 7d posts from {username}...")
                 success, result_msg = forward_last_7d_sync(username)
+                context.bot.send_message(update.effective_chat.id, text=result_msg, parse_mode="HTML")
+                
+                # Add delay to ensure forwarding completes
+                import time
+                time.sleep(3)
+                
+                # THEN: Scrape from target channel (now messages exist there)
+                update.message.reply_text(f"⏳ Starting 7-day data scraping from {username}...")
+                success, result_msg = scrape_channel_7days_sync(username)
                 context.bot.send_message(update.effective_chat.id, text=result_msg, parse_mode="HTML")
                 
             except Exception as e:
@@ -1095,7 +1097,6 @@ def add_channel(update, context):
         update.message.reply_text(f"❌ Could not add channel: {str(e)}")
     except Exception as e:
         update.message.reply_text(f"❌ Unexpected error: {str(e)}")
-
 @authorized
 def debug_s3_parquet(update, context):
     """Enhanced debug command to check S3 parquet file status"""
