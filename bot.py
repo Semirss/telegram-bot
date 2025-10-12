@@ -20,7 +20,7 @@ import threading
 import boto3
 import io
 import tempfile
-
+from telegram.error import BadRequest, Conflict  # Add Conflict to imports
 app = Flask(__name__)
 
 @app.route("/")
@@ -31,8 +31,6 @@ def home():
 def run_flask():
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
-
-threading.Thread(target=run_flask, daemon=True).start()
 
 # === 🔐 Load environment variables ===
 load_dotenv()
@@ -88,7 +86,12 @@ db = client["yetal"]
 channels_collection = db["yetalcollection"]
 auth_collection = db["authorized_users"]
 session_usage_collection = db["session_usage"]
-
+def error_handler(update, context):
+    """Handle errors including Conflict errors"""
+    if isinstance(context.error, Conflict):
+        print("❌ Conflict error detected - another bot instance might be running")
+        return
+    print(f'❌ Update "{update}" caused error "{context.error}"')
 # === 🔄 AWS S3 File Management Functions (S3 ONLY) ===
 def file_exists_in_s3(s3_key):
     """Efficiently check if file exists in S3 using head_object (no download)"""
@@ -1426,10 +1429,23 @@ def code(update, context):
 # Main (S3 ONLY)
 # ======================
 def main():
+    # Start Flask thread
+    threading.Thread(target=run_flask, daemon=True).start()
+    
     from telegram.utils.request import Request
-    updater = Updater(BOT_TOKEN, use_context=True)
+    from telegram.error import Conflict
+    
+    # ✅ FIX: Add Request with proper configuration
+    request = Request(connect_timeout=30, read_timeout=30, con_pool_size=8)
+    
+    # ✅ FIX: Pass request to Updater
+    updater = Updater(BOT_TOKEN, use_context=True, request=request)
     dp = updater.dispatcher
+    
+    # Add error handler
+    dp.add_error_handler(error_handler)
    
+    # All your existing handlers
     dp.add_handler(CommandHandler("start", start))
     dp.add_handler(CommandHandler("code", code))
     dp.add_handler(CommandHandler("addchannel", add_channel))
@@ -1449,6 +1465,7 @@ def main():
     dp.add_handler(CommandHandler("debug_parquet", debug_s3_parquet))
     dp.add_handler(CommandHandler("test_s3_write", test_s3_write))
     dp.add_handler(CommandHandler("debug_parquet_comprehensive", debug_parquet_comprehensive))
+    
     print(f"🤖 Bot is running...")
     print(f"🔧 Using session file: {USER_SESSION_FILE}")
     print(f"🌍 Environment: {'render' if 'RENDER' in os.environ else 'local'}")
@@ -1462,14 +1479,22 @@ def main():
     ensure_s3_structure()
     
     try:
-        updater.start_polling()
+        # ✅ FIX: Use improved start_polling with parameters
+        updater.start_polling(
+            timeout=10,
+            drop_pending_updates=True,
+            allowed_updates=['message', 'callback_query']
+        )
+        print("✅ Bot started successfully!")
         updater.idle()
+    except Conflict as e:
+        print(f"❌ Bot conflict error: {e}")
+        print("💡 Another bot instance might be running. Wait a few minutes and try again.")
     except KeyboardInterrupt:
         print("\n🛑 Shutting down bot...")
     except Exception as e:
         print(f"❌ Bot error: {e}")
     finally:
         print("👋 Bot stopped")
-
 if __name__ == "__main__":
     main()
