@@ -21,28 +21,6 @@ import boto3
 import io
 import tempfile
 
-# === 🤖 AI Models Setup ===
-try:
-    from transformers import pipeline, AutoTokenizer, AutoModel
-    import spacy
-    from uuid import uuid4
-    import numpy as np
-    from sklearn.metrics.pairwise import cosine_similarity
-    
-    # Initialize AI models
-    print("Loading AI models...")
-    classifier = pipeline("zero-shot-classification", model="facebook/bart-large-mnli")
-    summarizer = pipeline("summarization", model="facebook/bart-large-cnn")
-    nlp = spacy.load("en_core_web_sm")  # For keyword extraction and NER
-    tokenizer = AutoTokenizer.from_pretrained("sentence-transformers/all-MiniLM-L6-v2")
-    embedder = AutoModel.from_pretrained("sentence-transformers/all-MiniLM-L6-v2")
-    
-    AI_MODELS_LOADED = True
-    print("✅ AI models loaded successfully")
-except Exception as e:
-    print(f"⚠️ AI models not loaded: {e}")
-    AI_MODELS_LOADED = False
-
 app = Flask(__name__)
 
 @app.route("/")
@@ -110,192 +88,6 @@ db = client["yetal"]
 channels_collection = db["yetalcollection"]
 auth_collection = db["authorized_users"]
 session_usage_collection = db["session_usage"]
-categories_collection = db["categories"]
-
-# === 🧹 Text cleaning and extraction helpers ===
-def clean_text(text: str) -> str:
-    if not isinstance(text, str):
-        return ""
-    # Remove URLs
-    text = re.sub(r"http\S+", "", text)
-    # Remove emojis and special characters
-    text = re.sub(r'[^\w\s,.]', '', text)
-    # Remove promotional and noise terms
-    text = re.sub(r'\b(restocked|detail|catch|new|sale|nishane|montale|phoera|libre|vanille)\b', '', text, flags=re.IGNORECASE)
-    # Remove extra whitespace
-    text = re.sub(r"\s+", " ", text)
-    return text.strip()
-
-def extract_info(text, message_id):
-    text = clean_text(text)
-    
-    title_match = re.split(r'\n|💸|☘️☘️PRICE|Price\s*:|💵', text)[0].strip()
-    title = title_match[:100] if title_match else "No Title"
-    
-    phone_matches = re.findall(r'(\+251\d{8,9}|09\d{8})', text)
-    phone = phone_matches[0] if phone_matches else ""
-    
-    price_match = re.search(
-        r'(Price|💸|☘️☘️PRICE)[:\s]*([\d,]+)|([\d,]+)\s*(ETB|Birr|birr|💵)', 
-        text, 
-        re.IGNORECASE
-    )
-    price = ""
-    if price_match:
-        price = price_match.group(2) or price_match.group(3) or ""
-        price = price.replace(',', '').strip()
-    
-    location_match = re.search(
-        r'(📍|Address|Location|🌺🌺)[:\s]*(.+?)(?=\n|☘️|📞|@|$)', 
-        text, 
-        re.IGNORECASE
-    )
-    location = location_match.group(2).strip() if location_match else ""
-    
-    channel_mention = re.search(r'(@\w+)', text)
-    channel_mention = channel_mention.group(1) if channel_mention else ""
-    
-    return {
-        "title": title,
-        "description": text,
-        "price": price,
-        "phone": phone,
-        "location": location,
-        "channel_mention": channel_mention,
-        "product_ref": str(message_id) 
-    }
-
-# === 🤖 AI Enrichment Functions ===
-def load_categories():
-    """Load categories from MongoDB with their representative descriptions."""
-    default_categories = [
-        {"name": "Electronics", "description": "Devices like phones, laptops, and gadgets"},
-        {"name": "Fashion", "description": "Clothing, shoes, and accessories"},
-        {"name": "Home Goods", "description": "Furniture, decor, and household items"},
-        {"name": "Beauty", "description": "Cosmetics, skincare, and makeup products"},
-        {"name": "Sports", "description": "Sporting equipment and gear"},
-        {"name": "Books", "description": "Books, novels, and literature"},
-        {"name": "Groceries", "description": "Food and grocery items"},
-        {"name": "Vehicles", "description": "Cars, bikes, and vehicles"},
-        {"name": "Medicine", "description": "Medicines and health remedies"},
-        {"name": "Perfume", "description": "Fragrances, colognes, and perfumes"}
-    ]
-    stored_categories = categories_collection.find_one({"_id": "categories"})
-    if stored_categories and "categories" in stored_categories:
-        return stored_categories["categories"]
-    else:
-        categories_collection.insert_one({"_id": "categories", "categories": default_categories})
-        return default_categories
-
-def save_categories(categories):
-    """Save updated categories to MongoDB."""
-    categories_collection.update_one(
-        {"_id": "categories"},
-        {"$set": {"categories": categories}},
-        upsert=True
-    )
-
-def get_text_embedding(text):
-    """Generate embedding for a text using sentence-transformers."""
-    if not AI_MODELS_LOADED:
-        return np.random.rand(1, 384)  # Fallback random embedding
-    
-    inputs = tokenizer(text, return_tensors="pt", padding=True, truncation=True, max_length=128)
-    outputs = embedder(**inputs)
-    return outputs.last_hidden_state.mean(dim=1).detach().numpy()
-
-def propose_new_category(text, classification_results, existing_categories):
-    """Propose a general category using semantic similarity and keyword extraction."""
-    if not AI_MODELS_LOADED:
-        return "Miscellaneous"
-    
-    text = clean_text(text).lower()
-    doc = nlp(text)
-    
-    # Use NER to exclude brand names and products
-    entities = {ent.text.lower() for ent in doc.ents if ent.label_ in ["ORG", "PRODUCT"]}
-    
-    # Extract single-word nouns, excluding noise and entities
-    keywords = [
-        token.text for token in doc 
-        if token.pos_ in ["NOUN"] and  # Only nouns, not PROPN
-        len(token.text) > 3 and 
-        token.text.lower() not in entities and 
-        token.text.lower() not in ['item', 'product', 'thing', 'restocked', 'detail', 'catch', 'new', 'sale']
-    ]
-    
-    # Generate embedding for the input text
-    text_embedding = get_text_embedding(text)
-    
-    # Compare with existing category descriptions
-    category_names = [cat["name"] for cat in existing_categories]
-    category_descriptions = [cat["description"] for cat in existing_categories]
-    category_embeddings = [get_text_embedding(desc) for desc in category_descriptions]
-    
-    similarities = cosine_similarity(text_embedding, category_embeddings)[0]
-    max_similarity = max(similarities) if similarities.size > 0 else 0
-    best_category_idx = np.argmax(similarities) if similarities.size > 0 else -1
-    
-    # If similarity is high enough, use the closest existing category
-    if max_similarity > 0.7:  # Adjustable threshold
-        return category_names[best_category_idx]
-    
-    # If keywords exist, use the first one as a new category
-    if keywords:
-        new_category = keywords[0].capitalize()
-        # Avoid overly specific categories by checking against existing ones
-        for cat in existing_categories:
-            if new_category.lower() in cat["description"].lower():
-                return cat["name"]
-        return new_category
-    
-    # Fallback to classifier's top category
-    if classification_results and classification_results["labels"]:
-        return classification_results["labels"][0]
-    
-    return "Miscellaneous"
-
-def enrich_product(title, desc):
-    """AI enrichment function for product categorization and summarization."""
-    if not AI_MODELS_LOADED:
-        return "Unknown", desc[:80] if desc else title[:80]
-    
-    text = desc if isinstance(desc, str) and len(desc) > 10 else title
-    text = clean_text(text)
-
-    # Load current categories
-    categories = load_categories()
-
-    # Category classification
-    try:
-        classification = classifier(text, candidate_labels=[cat["name"] for cat in categories])
-        top_category = classification["labels"][0]
-        top_score = classification["scores"][0]
-
-        # Use semantic similarity for unseen data
-        new_category = propose_new_category(text, classification, categories)
-        if new_category not in [cat["name"] for cat in categories]:
-            # Add new category with a description
-            new_cat_description = text[:100]  # Use first 100 chars as description
-            categories.append({"name": new_category, "description": new_cat_description})
-            save_categories(categories)
-            print(f"📚 Added new category: {new_category}")
-        category = new_category
-    except Exception as e:
-        print(f"⚠️ Classification error: {e}")
-        category = "Unknown"
-
-    # Summarized description
-    try:
-        if len(text) > 50:
-            summary = summarizer(text, max_length=40, min_length=10, do_sample=False)[0]["summary_text"]
-        else:
-            summary = text
-    except Exception as e:
-        print(f"⚠️ Summarization error: {e}")
-        summary = text[:80]
-
-    return category, summary
 
 # === 🔄 AWS S3 File Management Functions (S3 ONLY) ===
 def file_exists_in_s3(s3_key):
@@ -460,6 +252,49 @@ def ensure_s3_structure():
         print("✅ Created data/ folder in S3")
     except Exception:
         print("✅ data/ folder already exists in S3")
+
+# === 🧹 Text cleaning and extraction helpers ===
+def clean_text(text):
+    return ' '.join(text.replace('\xa0', ' ').split())
+
+def extract_info(text, message_id):
+    text = clean_text(text)
+    
+    title_match = re.split(r'\n|💸|☘️☘️PRICE|Price\s*:|💵', text)[0].strip()
+    title = title_match[:100] if title_match else "No Title"
+    
+    phone_matches = re.findall(r'(\+251\d{8,9}|09\d{8})', text)
+    phone = phone_matches[0] if phone_matches else ""
+    
+    price_match = re.search(
+        r'(Price|💸|☘️☘️PRICE)[:\s]*([\d,]+)|([\d,]+)\s*(ETB|Birr|birr|💵)', 
+        text, 
+        re.IGNORECASE
+    )
+    price = ""
+    if price_match:
+        price = price_match.group(2) or price_match.group(3) or ""
+        price = price.replace(',', '').strip()
+    
+    location_match = re.search(
+        r'(📍|Address|Location|🌺🌺)[:\s]*(.+?)(?=\n|☘️|📞|@|$)', 
+        text, 
+        re.IGNORECASE
+    )
+    location = location_match.group(2).strip() if location_match else ""
+    
+    channel_mention = re.search(r'(@\w+)', text)
+    channel_mention = channel_mention.group(1) if channel_mention else ""
+    
+    return {
+        "title": title,
+        "description": text,
+        "price": price,
+        "phone": phone,
+        "location": location,
+        "channel_mention": channel_mention,
+        "product_ref": str(message_id) 
+    }
 
 # ======================
 # Wrapper for command authorization
@@ -628,191 +463,6 @@ async def get_telethon_client():
                 return None
     
     return None
-
-# ======================
-# 7-day scraping function with AI ENRICHMENT and PURE S3 integration
-# ======================
-async def scrape_channel_7days_async(channel_username: str):
-    """Scrape last 7 days of data from a channel, apply AI enrichment, and store ONLY in S3"""
-    telethon_client = None
-    
-    try:
-        # Use direct S3 access for parquet data
-        print("🔍 Loading parquet data directly from S3...")
-        
-        telethon_client = await get_telethon_client()
-        if not telethon_client:
-            track_session_usage("scraping", False, "Failed to initialize client")
-            return False, "❌ Could not establish connection for scraping."
-        
-        print(f"🔍 Starting 7-day scrape for channel: {channel_username}")
-        
-        try:
-            entity = await telethon_client.get_entity(channel_username)
-            print(f"✅ Channel found: {entity.title}")
-        except (ChannelInvalidError, UsernameInvalidError, UsernameNotOccupiedError) as e:
-            track_session_usage("scraping", False, f"Invalid channel: {str(e)}")
-            return False, f"❌ Channel {channel_username} is invalid or doesn't exist."
-        
-        try:
-            target_entity = await telethon_client.get_entity(FORWARD_CHANNEL)
-            print(f"✅ Target channel resolved: {target_entity.title}")
-        except Exception as e:
-            track_session_usage("scraping", False, f"Target channel error: {str(e)}")
-            return False, f"❌ Could not resolve target channel: {str(e)}"
-        
-        now = datetime.now(timezone.utc)
-        cutoff = now - timedelta(days=7)
-        print(f"⏰ Scraping messages from last 7 days (since {cutoff})")
-        
-        source_messages = []
-        print(f"📡 Collecting messages from source channel: {channel_username}")
-        
-        async for message in telethon_client.iter_messages(entity, limit=None):
-            if not message.text:
-                continue
-            if message.date < cutoff:
-                break
-            source_messages.append({
-                'text': message.text,
-                'date': message.date,
-                'source_channel': channel_username,
-                'source_message_id': message.id
-            })
-        
-        print(f"📋 Collected {len(source_messages)} messages from source channel")
-        
-        scraped_data = []
-        message_count = 0
-        
-        print(f"🔍 Searching for matching messages in target channel...")
-        
-        async for message in telethon_client.iter_messages(target_entity, limit=None):
-            message_count += 1
-            if message_count % 50 == 0:
-                print(f"📊 Processed {message_count} messages in target channel...")
-            if message.date < cutoff:
-                print(f"⏹️ Reached 7-day cutoff at message {message_count}")
-                break
-            if not message.text:
-                continue
-
-            matching_source = None
-            for source_msg in source_messages:
-                if (source_msg['text'] in message.text or 
-                    message.text in source_msg['text'] or
-                    source_msg['text'][:100] in message.text):
-                    matching_source = source_msg
-                    break
-
-            if not matching_source:
-                continue
-
-            info = extract_info(message.text, message.id)
-            
-            # === 🤖 AI ENRICHMENT ===
-            print(f"🤖 Enriching product: {info['title'][:50]}...")
-            predicted_category, generated_description = enrich_product(info["title"], info["description"])
-            
-            if getattr(target_entity, "username", None):
-                post_link = f"https://t.me/{target_entity.username}/{message.id}"
-            else:
-                internal_id = str(target_entity.id)
-                if internal_id.startswith("-100"):
-                    internal_id = internal_id[4:]
-                post_link = f"https://t.me/c/{internal_id}/{message.id}"
-
-            post_data = {
-                "title": info["title"],
-                "description": info["description"],
-                "price": info["price"],
-                "phone": info["phone"],
-                "location": info["location"],
-                "date": message.date.strftime("%Y-%m-%d %H:%M:%S"),
-                "channel": channel_username,
-                "post_link": post_link,
-                "product_ref": str(message.id),
-                "scraped_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                # === 🤖 AI ENRICHMENT FIELDS ===
-                "predicted_category": predicted_category,
-                "generated_description": generated_description
-            }
-            scraped_data.append(post_data)
-        
-        print(f"📋 Found {len(scraped_data)} matching messages in target channel")
-        
-        # Load existing data DIRECTLY FROM S3
-        existing_df = load_parquet_from_s3()
-        if existing_df is None:
-            existing_df = pd.DataFrame()
-        
-        print(f"📁 Loaded existing data with {len(existing_df)} records from S3")
-        
-        new_df = pd.DataFrame(scraped_data)
-        if not new_df.empty:
-            # Combine and deduplicate
-            combined_df = pd.concat([existing_df, new_df], ignore_index=True)
-            combined_df = combined_df.drop_duplicates(subset=['product_ref', 'channel'], keep='last')
-            
-            # Save ONLY to S3
-            success = save_parquet_to_s3(combined_df)
-            if success:
-                print(f"💾 Saved {len(combined_df)} total records to S3")
-                new_count = len(combined_df) - len(existing_df)
-                
-                # === 🤖 AI ENRICHMENT SUMMARY ===
-                if AI_MODELS_LOADED and 'predicted_category' in combined_df.columns:
-                    category_counts = combined_df['predicted_category'].value_counts()
-                    print("\n📈 AI Enrichment Summary:")
-                    for category, count in category_counts.items():
-                        print(f"  {category}: {count} products")
-                
-                track_session_usage("scraping", True, f"Scraped {len(scraped_data)} messages")
-                return True, f"✅ Scraped {len(scraped_data)} messages from {channel_username}. Added {new_count} new records to database."
-            else:
-                track_session_usage("scraping", False, "S3 save failed")
-                return False, f"❌ Failed to save scraped data for {channel_username} to S3."
-        else:
-            track_session_usage("scraping", True, "No new messages found")
-            return False, f"📭 No matching messages found in target channel for {channel_username} in the last 7 days."
-            
-    except Exception as e:
-        error_msg = f"Scraping error: {str(e)}"
-        print(f"❌ {error_msg}")
-        import traceback
-        print(f"🔍 Full traceback: {traceback.format_exc()}")
-        track_session_usage("scraping", False, error_msg)
-        return False, f"❌ Scraping error: {str(e)}"
-    finally:
-        if telethon_client:
-            try:
-                await telethon_client.disconnect()
-                # Upload session file to S3 after operations
-                print("📤 Uploading updated session file to S3...")
-                if os.path.exists(USER_SESSION_FILE):
-                    with open(USER_SESSION_FILE, 'rb') as f:
-                        s3.put_object(
-                            Bucket=AWS_BUCKET_NAME,
-                            Key=f"sessions/{USER_SESSION_FILE}",
-                            Body=f.read()
-                        )
-                    print(f"✅ Session file uploaded to S3: {USER_SESSION_FILE}")
-                    # Clean up temporary file
-                    os.remove(USER_SESSION_FILE)
-            except Exception as e:
-                print(f"⚠️ Error during cleanup: {e}")
-
-def scrape_channel_7days_sync(channel_username: str):
-    """Synchronous wrapper for 7-day scraping with AI enrichment"""
-    try:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        result = loop.run_until_complete(scrape_channel_7days_async(channel_username))
-        loop.close()
-        return result
-    except Exception as e:
-        track_session_usage("scraping", False, f"Sync error: {str(e)}")
-        return False, f"❌ Scraping error: {str(e)}"
 
 # ======================
 # Forward last 7d posts with PURE S3 integration
@@ -1077,23 +727,23 @@ def debug_parquet_comprehensive(update, context):
                 s3_df = load_parquet_from_s3()
                 if not s3_df.empty:
                     msg += f"📊 <b>S3 Data:</b> {len(s3_df)} records\n"
-                    
-                    # Show AI enrichment fields if available
-                    if 'predicted_category' in s3_df.columns:
-                        msg += f"🤖 <b>AI Enrichment:</b> ✅ Active\n"
-                        category_counts = s3_df['predicted_category'].value_counts()
-                        msg += f"📈 <b>Category Distribution:</b>\n"
-                        for category, count in category_counts.head(5).items():
-                            msg += f"• {category}: {count} records\n"
-                    else:
-                        msg += f"🤖 <b>AI Enrichment:</b> ❌ Not available\n"
                 else:
                     msg += "⚠️ S3 file exists but contains no data\n"
             except Exception as e:
                 msg += f"❌ <b>S3 Error:</b> {e}\n"
         
-        # AI Models Status
-        msg += f"\n🤖 <b>AI Models Status:</b> {'✅ Loaded' if AI_MODELS_LOADED else '❌ Not Loaded'}\n"
+        # Data summary if available
+        if not s3_df.empty:
+            msg += f"\n📈 <b>Data Summary:</b>\n"
+            msg += f"• Total Records: {len(s3_df)}\n"
+            msg += f"• Date Range: {s3_df['date'].min() if 'date' in s3_df.columns else 'N/A'} to {s3_df['date'].max() if 'date' in s3_df.columns else 'N/A'}\n"
+            msg += f"• Channels: {s3_df['channel'].nunique() if 'channel' in s3_df.columns else 'N/A'}\n"
+            
+            if 'channel' in s3_df.columns:
+                msg += f"\n🔍 <b>Top Channels:</b>\n"
+                channel_counts = s3_df['channel'].value_counts().head(3)
+                for channel, count in channel_counts.items():
+                    msg += f"• {channel}: {count} records\n"
         
         update.message.reply_text(msg, parse_mode="HTML")
         
@@ -1115,9 +765,7 @@ def test_s3_write(update, context):
             "channel": ["@testchannel"],
             "post_link": ["https://t.me/test/1"],
             "product_ref": ["test123"],
-            "scraped_at": [datetime.now().strftime("%Y-%m-%d %H:%M:%S")],
-            "predicted_category": ["Test Category"],
-            "generated_description": ["Test AI-generated description"]
+            "scraped_at": [datetime.now().strftime("%Y-%m-%d %H:%M:%S")]
         }
         
         test_df = pd.DataFrame(test_data)
@@ -1187,8 +835,7 @@ def check_session_usage(update, context):
         msg += f"🔧 <b>Current Session:</b> {stats['current_session']}\n"
         msg += f"🌍 <b>Environment:</b> {stats['current_environment']}\n"
         msg += f"💻 <b>Computer:</b> {platform.node()}\n"
-        msg += f"☁️ <b>S3 Bucket:</b> {AWS_BUCKET_NAME}\n"
-        msg += f"🤖 <b>AI Models:</b> {'✅ Loaded' if AI_MODELS_LOADED else '❌ Not Loaded'}\n\n"
+        msg += f"☁️ <b>S3 Bucket:</b> {AWS_BUCKET_NAME}\n\n"
         
         msg += f"📈 <b>Operations Summary:</b>\n"
         msg += f"• Total Operations: {stats['total_operations']}\n"
@@ -1226,6 +873,176 @@ def check_session_usage(update, context):
         update.message.reply_text(f"❌ Error checking session usage: {e}")
 
 # ======================
+# 7-day scraping function with PURE S3 integration
+# ======================
+async def scrape_channel_7days_async(channel_username: str):
+    """Scrape last 7 days of data from a channel and store ONLY in S3"""
+    telethon_client = None
+    
+    try:
+        # Use direct S3 access for parquet data
+        print("🔍 Loading parquet data directly from S3...")
+        
+        telethon_client = await get_telethon_client()
+        if not telethon_client:
+            track_session_usage("scraping", False, "Failed to initialize client")
+            return False, "❌ Could not establish connection for scraping."
+        
+        print(f"🔍 Starting 7-day scrape for channel: {channel_username}")
+        
+        try:
+            entity = await telethon_client.get_entity(channel_username)
+            print(f"✅ Channel found: {entity.title}")
+        except (ChannelInvalidError, UsernameInvalidError, UsernameNotOccupiedError) as e:
+            track_session_usage("scraping", False, f"Invalid channel: {str(e)}")
+            return False, f"❌ Channel {channel_username} is invalid or doesn't exist."
+        
+        try:
+            target_entity = await telethon_client.get_entity(FORWARD_CHANNEL)
+            print(f"✅ Target channel resolved: {target_entity.title}")
+        except Exception as e:
+            track_session_usage("scraping", False, f"Target channel error: {str(e)}")
+            return False, f"❌ Could not resolve target channel: {str(e)}"
+        
+        now = datetime.now(timezone.utc)
+        cutoff = now - timedelta(days=7)
+        print(f"⏰ Scraping messages from last 7 days (since {cutoff})")
+        
+        source_messages = []
+        print(f"📡 Collecting messages from source channel: {channel_username}")
+        
+        async for message in telethon_client.iter_messages(entity, limit=None):
+            if not message.text:
+                continue
+            if message.date < cutoff:
+                break
+            source_messages.append({
+                'text': message.text,
+                'date': message.date,
+                'source_channel': channel_username,
+                'source_message_id': message.id
+            })
+        
+        print(f"📋 Collected {len(source_messages)} messages from source channel")
+        
+        scraped_data = []
+        message_count = 0
+        
+        print(f"🔍 Searching for matching messages in target channel...")
+        
+        async for message in telethon_client.iter_messages(target_entity, limit=None):
+            message_count += 1
+            if message_count % 50 == 0:
+                print(f"📊 Processed {message_count} messages in target channel...")
+            if message.date < cutoff:
+                print(f"⏹️ Reached 7-day cutoff at message {message_count}")
+                break
+            if not message.text:
+                continue
+
+            matching_source = None
+            for source_msg in source_messages:
+                if (source_msg['text'] in message.text or 
+                    message.text in source_msg['text'] or
+                    source_msg['text'][:100] in message.text):
+                    matching_source = source_msg
+                    break
+
+            if not matching_source:
+                continue
+
+            info = extract_info(message.text, message.id)
+            
+            if getattr(target_entity, "username", None):
+                post_link = f"https://t.me/{target_entity.username}/{message.id}"
+            else:
+                internal_id = str(target_entity.id)
+                if internal_id.startswith("-100"):
+                    internal_id = internal_id[4:]
+                post_link = f"https://t.me/c/{internal_id}/{message.id}"
+
+            post_data = {
+                "title": info["title"],
+                "description": info["description"],
+                "price": info["price"],
+                "phone": info["phone"],
+                "location": info["location"],
+                "date": message.date.strftime("%Y-%m-%d %H:%M:%S"),
+                "channel": channel_username,
+                "post_link": post_link,
+                "product_ref": str(message.id),
+                "scraped_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            }
+            scraped_data.append(post_data)
+        
+        print(f"📋 Found {len(scraped_data)} matching messages in target channel")
+        
+        # Load existing data DIRECTLY FROM S3
+        existing_df = load_parquet_from_s3()
+        if existing_df is None:
+            existing_df = pd.DataFrame()
+        
+        print(f"📁 Loaded existing data with {len(existing_df)} records from S3")
+        
+        new_df = pd.DataFrame(scraped_data)
+        if not new_df.empty:
+            # Combine and deduplicate
+            combined_df = pd.concat([existing_df, new_df], ignore_index=True)
+            combined_df = combined_df.drop_duplicates(subset=['product_ref', 'channel'], keep='last')
+            
+            # Save ONLY to S3
+            success = save_parquet_to_s3(combined_df)
+            if success:
+                print(f"💾 Saved {len(combined_df)} total records to S3")
+                new_count = len(combined_df) - len(existing_df)
+                track_session_usage("scraping", True, f"Scraped {len(scraped_data)} messages")
+                return True, f"✅ Scraped {len(scraped_data)} messages from {channel_username}. Added {new_count} new records to database."
+            else:
+                track_session_usage("scraping", False, "S3 save failed")
+                return False, f"❌ Failed to save scraped data for {channel_username} to S3."
+        else:
+            track_session_usage("scraping", True, "No new messages found")
+            return False, f"📭 No matching messages found in target channel for {channel_username} in the last 7 days."
+            
+    except Exception as e:
+        error_msg = f"Scraping error: {str(e)}"
+        print(f"❌ {error_msg}")
+        import traceback
+        print(f"🔍 Full traceback: {traceback.format_exc()}")
+        track_session_usage("scraping", False, error_msg)
+        return False, f"❌ Scraping error: {str(e)}"
+    finally:
+        if telethon_client:
+            try:
+                await telethon_client.disconnect()
+                # Upload session file to S3 after operations
+                print("📤 Uploading updated session file to S3...")
+                if os.path.exists(USER_SESSION_FILE):
+                    with open(USER_SESSION_FILE, 'rb') as f:
+                        s3.put_object(
+                            Bucket=AWS_BUCKET_NAME,
+                            Key=f"sessions/{USER_SESSION_FILE}",
+                            Body=f.read()
+                        )
+                    print(f"✅ Session file uploaded to S3: {USER_SESSION_FILE}")
+                    # Clean up temporary file
+                    os.remove(USER_SESSION_FILE)
+            except Exception as e:
+                print(f"⚠️ Error during cleanup: {e}")
+
+def scrape_channel_7days_sync(channel_username: str):
+    """Synchronous wrapper for 7-day scraping"""
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        result = loop.run_until_complete(scrape_channel_7days_async(channel_username))
+        loop.close()
+        return result
+    except Exception as e:
+        track_session_usage("scraping", False, f"Sync error: {str(e)}")
+        return False, f"❌ Scraping error: {str(e)}"
+
+# ======================
 # Bot commands (remain the same but now use pure S3 functions)
 # ======================
 @authorized
@@ -1256,8 +1073,8 @@ def add_channel(update, context):
         # Run operations sequentially
         def run_operations():
             try:
-                # First scraping with AI enrichment
-                update.message.reply_text(f"⏳ Starting 7-day data scraping from {username} with AI enrichment...")
+                # First scraping
+                update.message.reply_text(f"⏳ Starting 7-day data scraping from {username}...")
                 success, result_msg = scrape_channel_7days_sync(username)
                 context.bot.send_message(update.effective_chat.id, text=result_msg, parse_mode="HTML")
                 
@@ -1289,8 +1106,7 @@ def debug_s3_parquet(update, context):
         exists = file_exists_in_s3(s3_key)
         msg = f"🔍 <b>S3 Parquet Debug Information</b>\n\n"
         msg += f"📁 <b>S3 Path:</b> {s3_key}\n"
-        msg += f"✅ <b>File Exists:</b> {'Yes' if exists else 'No'}\n"
-        msg += f"🤖 <b>AI Models:</b> {'✅ Loaded' if AI_MODELS_LOADED else '❌ Not Loaded'}\n\n"
+        msg += f"✅ <b>File Exists:</b> {'Yes' if exists else 'No'}\n\n"
         
         if exists:
             # Get file info
@@ -1311,14 +1127,6 @@ def debug_s3_parquet(update, context):
                     msg += f"• Total Records: {len(df)}\n"
                     msg += f"• Date Range: {df['date'].min()} to {df['date'].max()}\n"
                     msg += f"• Channels: {df['channel'].nunique()}\n\n"
-                    
-                    # Show AI enrichment info if available
-                    if 'predicted_category' in df.columns:
-                        msg += f"🤖 <b>AI Enrichment:</b>\n"
-                        category_counts = df['predicted_category'].value_counts()
-                        for category, count in category_counts.head(3).items():
-                            msg += f"• {category}: {count} records\n"
-                        msg += f"\n"
                     
                     msg += f"🔍 <b>Channel Distribution:</b>\n"
                     channel_counts = df['channel'].value_counts()
@@ -1346,15 +1154,6 @@ def check_scraped_data(update, context):
             
             msg = f"📊 <b>Scraped Data Summary (from S3):</b>\n"
             msg += f"Total records: {len(df)}\n\n"
-            
-            # Show AI enrichment summary if available
-            if 'predicted_category' in df.columns:
-                category_counts = df['predicted_category'].value_counts()
-                msg += "<b>AI Category Distribution:</b>\n"
-                for category, count in category_counts.head(5).items():
-                    msg += f"• {category}: {count} records\n"
-                msg += f"\n"
-            
             msg += "<b>Records per channel:</b>\n"
             
             for channel, count in channel_counts.items():
@@ -1438,8 +1237,7 @@ def check_s3_status(update, context):
         
         msg = f"☁️ <b>S3 Status Report (Efficient Check)</b>\n\n"
         msg += f"<b>Bucket Connection:</b> {bucket_status}\n"
-        msg += f"<b>Bucket Name:</b> {AWS_BUCKET_NAME}\n"
-        msg += f"<b>AI Models:</b> {'✅ Loaded' if AI_MODELS_LOADED else '❌ Not Loaded'}\n\n"
+        msg += f"<b>Bucket Name:</b> {AWS_BUCKET_NAME}\n\n"
         
         msg += f"<b>File Status (using head_object):</b>\n"
         for file_type, exists in files_status.items():
@@ -1500,8 +1298,7 @@ def test_connection(update, context):
                         return f"{s3_status}\n❌ Could not establish Telethon connection."
                     
                     me = await client.get_me()
-                    result = f"{s3_status}\n✅ Telethon connected as: {me.first_name} (@{me.username})\n"
-                    result += f"🤖 AI Models: {'✅ Loaded' if AI_MODELS_LOADED else '❌ Not Loaded'}\n\n"
+                    result = f"{s3_status}\n✅ Telethon connected as: {me.first_name} (@{me.username})\n\n"
                     
                     try:
                         target = await client.get_entity(FORWARD_CHANNEL)
@@ -1565,8 +1362,7 @@ def diagnose_session(update, context):
         
         msg = f"🔍 <b>Session Diagnosis (S3 ONLY)</b>\n\n"
         msg += f"📁 <b>Session File:</b> {USER_SESSION_FILE}\n"
-        msg += f"☁️ <b>S3 Exists:</b> {'✅' if s3_exists else '❌'}\n"
-        msg += f"🤖 <b>AI Models:</b> {'✅ Loaded' if AI_MODELS_LOADED else '❌ Not Loaded'}\n\n"
+        msg += f"☁️ <b>S3 Exists:</b> {'✅' if s3_exists else '❌'}\n\n"
         
         if not s3_exists:
             msg += "❌ <b>Problem:</b> No session file exists in S3!\n"
@@ -1657,7 +1453,6 @@ def main():
     print(f"🔧 Using session file: {USER_SESSION_FILE}")
     print(f"🌍 Environment: {'render' if 'RENDER' in os.environ else 'local'}")
     print(f"☁️ S3 Bucket: {AWS_BUCKET_NAME}")
-    print(f"🤖 AI Models: {'✅ Loaded' if AI_MODELS_LOADED else '❌ Not Loaded'}")
     
     # Efficiently check all S3 files on startup
     print("\n🔍 Checking S3 files efficiently (using head_object)...")
