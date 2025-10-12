@@ -20,6 +20,7 @@ import threading
 import boto3
 import io
 import tempfile
+from telegram import Bot
 from telegram.error import BadRequest, Conflict  # Add Conflict to imports
 app = Flask(__name__)
 
@@ -1435,11 +1436,12 @@ def main():
     from telegram.utils.request import Request
     from telegram.error import Conflict
     
-    # ✅ FIX: Add Request with proper configuration
+    # ✅ FIX: Create Bot with Request instead of passing to Updater
     request = Request(connect_timeout=30, read_timeout=30, con_pool_size=8)
+    bot = Bot(token=BOT_TOKEN, request=request)
     
-    # ✅ FIX: Pass request to Updater
-    updater = Updater(BOT_TOKEN, use_context=True, request=request)
+    # ✅ FIX: Pass bot to Updater instead of token
+    updater = Updater(bot=bot, use_context=True)
     dp = updater.dispatcher
     
     # Add error handler
