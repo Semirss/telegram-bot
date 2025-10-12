@@ -16,7 +16,7 @@ pyarrow==20.0.0
 # AI/ML Dependencies (Updated for Python 3.13)
 transformers==4.45.1
 torch==2.5.1
-spacy==3.7.7
+spacy==3.8.7
 scikit-learn==1.5.2
 numpy==2.0.2
 sentence-transformers==3.3.1
