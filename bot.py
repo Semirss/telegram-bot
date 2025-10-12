@@ -1427,10 +1427,9 @@ def code(update, context):
 # ======================
 def main():
     from telegram.utils.request import Request
-    request = Request(connect_timeout=30, read_timeout=30, con_pool_size=8)
     updater = Updater(BOT_TOKEN, use_context=True)
     dp = updater.dispatcher
-    request=request
+   
     dp.add_handler(CommandHandler("start", start))
     dp.add_handler(CommandHandler("code", code))
     dp.add_handler(CommandHandler("addchannel", add_channel))
