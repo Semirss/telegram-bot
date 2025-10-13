@@ -593,12 +593,12 @@ def cleanup_telethon_sessions(channel_username=None):
         print(f"❌ Error cleaning up session files: {e}")
 
 async def get_telethon_client():
-    """Get the main Telethon client with PURE S3 session management"""
+    """Get the main Telethon client with READ-ONLY session handling"""
     client = None
     max_retries = 3
     retry_delay = 2
     
-    # Download session file from S3 to memory (not to local file)
+    # Download session file from S3 to memory
     session_data = None
     try:
         response = s3.get_object(Bucket=AWS_BUCKET_NAME, Key=f"sessions/{USER_SESSION_FILE}")
@@ -615,11 +615,19 @@ async def get_telethon_client():
         try:
             print(f"🔧 Attempt {attempt + 1}/{max_retries} to connect Telethon client...")
             
-            # Create session from memory - write to temporary file for Telethon
-            with open(USER_SESSION_FILE, 'wb') as f:
+            # 🚀 FIX: Create a temporary writable session file
+            temp_session_file = f"temp_{USER_SESSION_FILE}"
+            with open(temp_session_file, 'wb') as f:
                 f.write(session_data)
             
-            session = SQLiteSession(USER_SESSION_FILE)
+            # 🚀 FIX: Set proper permissions for the temp file
+            try:
+                os.chmod(temp_session_file, 0o644)
+            except:
+                pass  # Ignore permission errors on some systems
+            
+            # Use the temporary session file
+            session = SQLiteSession(temp_session_file)
             client = TelegramClient(session, API_ID, API_HASH)
             
             await asyncio.wait_for(client.connect(), timeout=15)
@@ -630,13 +638,16 @@ async def get_telethon_client():
                 track_session_usage("connection", False, error_msg)
                 await client.disconnect()
                 # Clean up temporary file
-                if os.path.exists(USER_SESSION_FILE):
-                    os.remove(USER_SESSION_FILE)
+                if os.path.exists(temp_session_file):
+                    os.remove(temp_session_file)
                 return None
             
             me = await asyncio.wait_for(client.get_me(), timeout=10)
             print(f"✅ Telethon connected successfully as: {me.first_name} (@{me.username})")
             track_session_usage("connection", True)
+            
+            # 🚀 FIX: Store the temp file name for cleanup
+            client.temp_session_file = temp_session_file
             return client
             
         except Exception as e:
@@ -651,8 +662,11 @@ async def get_telethon_client():
                     pass
             
             # Clean up temporary file on error
-            if os.path.exists(USER_SESSION_FILE):
-                os.remove(USER_SESSION_FILE)
+            if 'temp_session_file' in locals() and os.path.exists(temp_session_file):
+                try:
+                    os.remove(temp_session_file)
+                except:
+                    pass
             
             if attempt < max_retries - 1:
                 print(f"⏳ Retrying in {retry_delay} seconds...")
@@ -1094,70 +1108,38 @@ async def scrape_channel_7days_async(channel_username: str):
             track_session_usage("scraping", False, f"Invalid channel: {str(e)}")
             return False, f"❌ Channel {channel_username} is invalid or doesn't exist."
         
-        try:
-            target_entity = await telethon_client.get_entity(FORWARD_CHANNEL)
-            print(f"✅ Target channel resolved: {target_entity.title}")
-        except Exception as e:
-            track_session_usage("scraping", False, f"Target channel error: {str(e)}")
-            return False, f"❌ Could not resolve target channel: {str(e)}"
-        
         now = datetime.now(timezone.utc)
         cutoff = now - timedelta(days=7)
         print(f"⏰ Scraping messages from last 7 days (since {cutoff})")
         
-        source_messages = []
-        print(f"📡 Collecting messages from source channel: {channel_username}")
-        
-        async for message in telethon_client.iter_messages(entity, limit=None):
-            if not message.text:
-                continue
-            if message.date < cutoff:
-                break
-            source_messages.append({
-                'text': message.text,
-                'date': message.date,
-                'source_channel': channel_username,
-                'source_message_id': message.id
-            })
-        
-        print(f"📋 Collected {len(source_messages)} messages from source channel")
-        
         scraped_data = []
         message_count = 0
         
-        print(f"🔍 Searching for matching messages in target channel...")
+        print(f"📡 Collecting messages directly from source channel: {channel_username}")
         
-        async for message in telethon_client.iter_messages(target_entity, limit=None):
+        # DIRECT APPROACH: Scrape from source channel instead of target channel
+        async for message in telethon_client.iter_messages(entity, limit=200):
             message_count += 1
-            if message_count % 50 == 0:
-                print(f"📊 Processed {message_count} messages in target channel...")
+            if message_count % 10 == 0:
+                print(f"📊 Processed {message_count} messages...")
+                
             if message.date < cutoff:
                 print(f"⏹️ Reached 7-day cutoff at message {message_count}")
                 break
+                
             if not message.text:
-                continue
-
-            matching_source = None
-            for source_msg in source_messages:
-                if (source_msg['text'] in message.text or 
-                    message.text in source_msg['text'] or
-                    source_msg['text'][:100] in message.text):
-                    matching_source = source_msg
-                    break
-
-            if not matching_source:
                 continue
 
             info = extract_info(message.text, message.id)
             
-            # 🔥 AI ENHANCEMENT: Add category and summary
+            # AI ENHANCEMENT
             print(f"🤖 AI enriching product: {info['title'][:50]}...")
             predicted_category, generated_description = enrich_product_with_ai(info["title"], info["description"])
             
-            if getattr(target_entity, "username", None):
-                post_link = f"https://t.me/{target_entity.username}/{message.id}"
+            if getattr(entity, "username", None):
+                post_link = f"https://t.me/{entity.username}/{message.id}"
             else:
-                internal_id = str(target_entity.id)
+                internal_id = str(entity.id)
                 if internal_id.startswith("-100"):
                     internal_id = internal_id[4:]
                 post_link = f"https://t.me/c/{internal_id}/{message.id}"
@@ -1173,15 +1155,15 @@ async def scrape_channel_7days_async(channel_username: str):
                 "post_link": post_link,
                 "product_ref": str(message.id),
                 "scraped_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                # 🔥 NEW AI FIELDS
                 "predicted_category": predicted_category,
                 "generated_description": generated_description,
                 "ai_enhanced": True
             }
             scraped_data.append(post_data)
         
-        print(f"📋 Found {len(scraped_data)} matching messages with AI enhancement")
+        print(f"📋 Found {len(scraped_data)} messages with AI enhancement")
         
+        # Rest of your existing code for saving to S3...
         # Load existing data DIRECTLY FROM S3
         existing_df = load_parquet_from_s3()
         if existing_df is None:
@@ -1214,7 +1196,7 @@ async def scrape_channel_7days_async(channel_username: str):
                 return False, f"❌ Failed to save AI-enhanced data for {channel_username} to S3."
         else:
             track_session_usage("scraping", True, "No new messages found")
-            return False, f"📭 No matching messages found in target channel for {channel_username} in the last 7 days."
+            return False, f"📭 No messages found for {channel_username} in the last 7 days."
             
     except Exception as e:
         error_msg = f"Scraping error: {str(e)}"
