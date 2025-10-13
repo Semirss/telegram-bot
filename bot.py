@@ -280,6 +280,7 @@ db = client["yetal"]
 channels_collection = db["yetalcollection"]
 auth_collection = db["authorized_users"]
 session_usage_collection = db["session_usage"]
+categories_collection = db["categories"]
 def error_handler(update, context):
     """Handle errors including Conflict errors"""
     if isinstance(context.error, Conflict):
