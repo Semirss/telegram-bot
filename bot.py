@@ -20,108 +20,10 @@ import threading
 import boto3
 import io
 import tempfile
-import shutil
 import requests
-
-# === 🤖 AI Models Setup with Hugging Face Inference API ===
-HF_API_TOKEN = os.getenv("HF_API_TOKEN")  # Optional for some models
-
-def classify_with_hf_api(text, candidate_labels):
-    """Use HF Inference API for zero-shot classification"""
-    try:
-        API_URL = "https://api-inference.huggingface.co/models/facebook/bart-large-mnli"
-        headers = {"Authorization": f"Bearer {HF_API_TOKEN}"} if HF_API_TOKEN else {}
-        
-        payload = {
-            "inputs": text,
-            "parameters": {"candidate_labels": candidate_labels}
-        }
-        
-        response = requests.post(API_URL, headers=headers, json=payload, timeout=30)
-        if response.status_code == 200:
-            result = response.json()
-            return result
-        else:
-            print(f"HF API classification error: {response.status_code} - {response.text}")
-            return None
-    except Exception as e:
-        print(f"HF API classification call failed: {e}")
-        return None
-
-def summarize_with_hf_api(text):
-    """Use HF Inference API for summarization"""
-    try:
-        API_URL = "https://api-inference.huggingface.co/models/facebook/bart-large-cnn"
-        headers = {"Authorization": f"Bearer {HF_API_TOKEN}"} if HF_API_TOKEN else {}
-        
-        payload = {
-            "inputs": text[:1024]  # Limit input length
-        }
-        
-        response = requests.post(API_URL, headers=headers, json=payload, timeout=30)
-        if response.status_code == 200:
-            result = response.json()
-            return result[0]['summary_text'] if result else text[:80]
-        else:
-            print(f"HF API summarization error: {response.status_code}")
-            return text[:80]
-    except Exception as e:
-        print(f"HF API summarization call failed: {e}")
-        return text[:80]
-
-def get_embedding_with_hf_api(text):
-    """Use HF Inference API for sentence embeddings"""
-    try:
-        API_URL = "https://api-inference.huggingface.co/models/sentence-transformers/all-MiniLM-L6-v2"
-        headers = {"Authorization": f"Bearer {HF_API_TOKEN}"} if HF_API_TOKEN else {}
-        
-        payload = {
-            "inputs": text
-        }
-        
-        response = requests.post(API_URL, headers=headers, json=payload, timeout=30)
-        if response.status_code == 200:
-            result = response.json()
-            # Return as numpy array for compatibility
-            import numpy as np
-            return np.array(result)
-        else:
-            print(f"HF API embedding error: {response.status_code}")
-            # Return random embedding as fallback
-            import numpy as np
-            return np.random.rand(384)
-    except Exception as e:
-        print(f"HF API embedding call failed: {e}")
-        import numpy as np
-        return np.random.rand(384)
-
-# Simple keyword-based fallback categorization
-def simple_category_detection(text):
-    """Simple keyword-based categorization as fallback"""
-    text_lower = text.lower()
-    
-    category_keywords = {
-        'Electronics': ['phone', 'laptop', 'tablet', 'computer', 'device', 'smartphone', 'iphone', 'samsung', 'android'],
-        'Fashion': ['shirt', 'dress', 'shoe', 'clothing', 'fashion', 'wear', 'jacket', 'pants', 'jeans'],
-        'Home Goods': ['furniture', 'home', 'house', 'decor', 'kitchen', 'sofa', 'chair', 'table'],
-        'Beauty': ['cosmetic', 'makeup', 'skincare', 'beauty', 'perfume', 'lipstick', 'cream', 'lotion'],
-        'Sports': ['sport', 'fitness', 'gym', 'exercise', 'ball', 'football', 'basketball', 'training'],
-        'Vehicles': ['car', 'bike', 'vehicle', 'motor', 'auto', 'toyota', 'honda', 'bmw'],
-        'Books': ['book', 'novel', 'literature', 'read', 'textbook', 'magazine'],
-        'Groceries': ['food', 'grocery', 'fruit', 'vegetable', 'rice', 'pasta', 'oil'],
-        'Medicine': ['medicine', 'drug', 'pharmacy', 'health', 'vitamin', 'supplement'],
-        'Perfume': ['perfume', 'fragrance', 'cologne', 'scent', 'aroma']
-    }
-    
-    for category, keywords in category_keywords.items():
-        if any(keyword in text_lower for keyword in keywords):
-            return category
-    
-    return "Other"
-
-AI_MODELS_LOADED = True  # Always loaded since we're using APIs
-print("✅ AI models setup complete (using Hugging Face Inference API)")
-
+import time
+from telegram import Bot
+from telegram.error import BadRequest, Conflict  # Add Conflict to imports
 app = Flask(__name__)
 
 @app.route("/")
@@ -132,8 +34,6 @@ def home():
 def run_flask():
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
-
-threading.Thread(target=run_flask, daemon=True).start()
 
 # === 🔐 Load environment variables ===
 load_dotenv()
@@ -160,6 +60,197 @@ s3 = boto3.client(
 FORWARDED_FILE = "forwarded_messages.json"
 scraped_7d = "scraped_7d.parquet"
 
+# === 🤖 AI Enhancement with Hugging Face API ===
+HF_API_TOKEN = os.getenv("HF_API_TOKEN")
+HF_API_URL = "https://api-inference.huggingface.co/models"
+
+def query_huggingface_api(payload, model_name, max_retries=3):
+    """Generic function to query Hugging Face API"""
+    headers = {"Authorization": f"Bearer {HF_API_TOKEN}"}
+    API_URL = f"{HF_API_URL}/{model_name}"
+    
+    for attempt in range(max_retries):
+        try:
+            response = requests.post(API_URL, headers=headers, json=payload, timeout=30)
+            
+            if response.status_code == 200:
+                return response.json()
+            elif response.status_code == 503:
+                # Model is loading, wait and retry
+                wait_time = 10 * (attempt + 1)
+                print(f"⏳ Model loading, waiting {wait_time}s...")
+                time.sleep(wait_time)
+                continue
+            else:
+                print(f"❌ API Error {response.status_code}: {response.text}")
+                return None
+                
+        except requests.exceptions.Timeout:
+            print(f"⏰ Request timeout (attempt {attempt + 1})")
+            continue
+        except Exception as e:
+            print(f"❌ Request error: {e}")
+            return None
+    
+    return None
+
+def ai_classify_text(text, categories):
+    """Classify text using Hugging Face zero-shot classification"""
+    candidate_labels = [cat["name"] for cat in categories]
+    
+    payload = {
+        "inputs": text,
+        "parameters": {"candidate_labels": candidate_labels}
+    }
+    
+    result = query_huggingface_api(payload, "facebook/bart-large-mnli")
+    
+    if result and "labels" in result and "scores" in result:
+        return {
+            "labels": result["labels"],
+            "scores": result["scores"]
+        }
+    return None
+
+def ai_summarize_text(text):
+    """Summarize text using Hugging Face summarization"""
+    if len(text) < 50:
+        return text
+    
+    payload = {
+        "inputs": text,
+        "parameters": {"max_length": 40, "min_length": 10, "do_sample": False}
+    }
+    
+    result = query_huggingface_api(payload, "facebook/bart-large-cnn")
+    
+    if result and isinstance(result, list) and len(result) > 0:
+        return result[0].get("summary_text", text[:80])
+    return text[:80]
+
+def extract_keywords_with_regex(text):
+    """Simple keyword extraction using regex patterns (no NER model needed)"""
+    text = clean_text(text).lower()
+    
+    # Common product-related patterns
+    patterns = {
+        'electronics': r'\b(phone|smartphone|laptop|tablet|computer|tv|television|headphone|earphone|camera|watch)\b',
+        'fashion': r'\b(shirt|dress|jeans|shoe|sneaker|bag|jacket|coat|accessory|jewelry)\b',
+        'home': r'\b(furniture|sofa|chair|table|bed|mattress|decor|kitchen|appliance)\b',
+        'beauty': r'\b(cosmetic|makeup|skincare|perfume|fragrance|cream|lotion|shampoo)\b',
+        'sports': r'\b(sport|football|basketball|tennis|gym|fitness|equipment|gear)\b',
+        'vehicles': r'\b(car|bike|motorcycle|vehicle|auto|automobile)\b',
+        'books': r'\b(book|novel|literature|magazine|textbook)\b',
+        'groceries': r'\b(food|grocery|fruit|vegetable|meat|drink|beverage)\b'
+    }
+    
+    for category, pattern in patterns.items():
+        if re.search(pattern, text):
+            return category
+    
+    # Fallback: extract simple nouns
+    words = re.findall(r'\b[a-z]{4,}\b', text)
+    common_nouns = [word for word in words if word not in [
+        'item', 'product', 'thing', 'restocked', 'detail', 'catch', 'new', 'sale', 'price', 'contact'
+    ]]
+    
+    return common_nouns[0].capitalize() if common_nouns else "Miscellaneous"
+
+def propose_new_category(text, classification_results, existing_categories):
+    """Propose category using API classification and keyword extraction"""
+    if classification_results and classification_results["labels"]:
+        top_category = classification_results["labels"][0]
+        top_score = classification_results["scores"][0]
+        
+        # If confidence is high, use the classified category
+        if top_score > 0.7:
+            return top_category
+    
+    # Fallback to keyword extraction
+    keyword_category = extract_keywords_with_regex(text)
+    
+    # Check if keyword category matches any existing category
+    for category in existing_categories:
+        if keyword_category.lower() in category["name"].lower():
+            return category["name"]
+    
+    return keyword_category if keyword_category != "Miscellaneous" else "Other"
+
+# === 📚 Dynamic Categories (Same as before but with API) ===
+def load_categories():
+    """Load categories from MongoDB"""
+    default_categories = [
+        {"name": "Electronics", "description": "Devices like phones, laptops, and gadgets"},
+        {"name": "Fashion", "description": "Clothing, shoes, and accessories"},
+        {"name": "Home Goods", "description": "Furniture, decor, and household items"},
+        {"name": "Beauty", "description": "Cosmetics, skincare, and makeup products"},
+        {"name": "Sports", "description": "Sporting equipment and gear"},
+        {"name": "Books", "description": "Books, novels, and literature"},
+        {"name": "Groceries", "description": "Food and grocery items"},
+        {"name": "Vehicles", "description": "Cars, bikes, and vehicles"},
+        {"name": "Medicine", "description": "Medicines and health remedies"},
+        {"name": "Perfume", "description": "Fragrances, colognes, and perfumes"}
+    ]
+    stored_categories = categories_collection.find_one({"_id": "categories"})
+    if stored_categories and "categories" in stored_categories:
+        return stored_categories["categories"]
+    else:
+        categories_collection.insert_one({"_id": "categories", "categories": default_categories})
+        return default_categories
+
+def save_categories(categories):
+    """Save updated categories to MongoDB"""
+    categories_collection.update_one(
+        {"_id": "categories"},
+        {"$set": {"categories": categories}},
+        upsert=True
+    )
+
+def enrich_product_with_ai(title, desc):
+    """Enhanced product enrichment using Hugging Face API"""
+    text = desc if isinstance(desc, str) and len(desc) > 10 else title
+    text = clean_text(text)
+    
+    if not text or len(text) < 10:
+        return "Unknown", "No description available"
+
+    # Load current categories
+    categories = load_categories()
+
+    # Category classification using API
+    try:
+        classification_results = ai_classify_text(text, categories)
+        
+        if classification_results:
+            category = propose_new_category(text, classification_results, categories)
+        else:
+            # Fallback if API fails
+            category = extract_keywords_with_regex(text)
+            
+        # Add new category if it doesn't exist and seems valid
+        if (category not in [cat["name"] for cat in categories] and 
+            category not in ["Unknown", "Other", "Miscellaneous"] and
+            len(category) > 2):
+            new_cat_description = f"Products related to {category.lower()}"
+            categories.append({"name": category, "description": new_cat_description})
+            save_categories(categories)
+            print(f"📚 Added new category: {category}")
+            
+    except Exception as e:
+        print(f"⚠️ Classification error: {e}")
+        category = extract_keywords_with_regex(text) or "Unknown"
+
+    # Summarized description using API
+    try:
+        if len(text) > 50:
+            summary = ai_summarize_text(text)
+        else:
+            summary = text
+    except Exception as e:
+        print(f"⚠️ Summarization error: {e}")
+        summary = text[:80] + "..." if len(text) > 80 else text
+
+    return category, summary
 # === 🔧 Environment Detection ===
 def get_session_filename():
     """Get unique session filename for each environment"""
@@ -189,191 +280,13 @@ db = client["yetal"]
 channels_collection = db["yetalcollection"]
 auth_collection = db["authorized_users"]
 session_usage_collection = db["session_usage"]
-categories_collection = db["categories"]
-
-# === 🧹 Text cleaning and extraction helpers ===
-def clean_text(text: str) -> str:
-    if not isinstance(text, str):
-        return ""
-    # Remove URLs
-    text = re.sub(r"http\S+", "", text)
-    # Remove emojis and special characters
-    text = re.sub(r'[^\w\s,.]', '', text)
-    # Remove promotional and noise terms
-    text = re.sub(r'\b(restocked|detail|catch|new|sale|nishane|montale|phoera|libre|vanille)\b', '', text, flags=re.IGNORECASE)
-    # Remove extra whitespace
-    text = re.sub(r"\s+", " ", text)
-    return text.strip()
-
-def extract_info(text, message_id):
-    text = clean_text(text)
-    
-    title_match = re.split(r'\n|💸|☘️☘️PRICE|Price\s*:|💵', text)[0].strip()
-    title = title_match[:100] if title_match else "No Title"
-    
-    phone_matches = re.findall(r'(\+251\d{8,9}|09\d{8})', text)
-    phone = phone_matches[0] if phone_matches else ""
-    
-    price_match = re.search(
-        r'(Price|💸|☘️☘️PRICE)[:\s]*([\d,]+)|([\d,]+)\s*(ETB|Birr|birr|💵)', 
-        text, 
-        re.IGNORECASE
-    )
-    price = ""
-    if price_match:
-        price = price_match.group(2) or price_match.group(3) or ""
-        price = price.replace(',', '').strip()
-    
-    location_match = re.search(
-        r'(📍|Address|Location|🌺🌺)[:\s]*(.+?)(?=\n|☘️|📞|@|$)', 
-        text, 
-        re.IGNORECASE
-    )
-    location = location_match.group(2).strip() if location_match else ""
-    
-    channel_mention = re.search(r'(@\w+)', text)
-    channel_mention = channel_mention.group(1) if channel_mention else ""
-    
-    return {
-        "title": title,
-        "description": text,
-        "price": price,
-        "phone": phone,
-        "location": location,
-        "channel_mention": channel_mention,
-        "product_ref": str(message_id) 
-    }
-
-# === 🤖 AI Enrichment Functions with HF API ===
-def load_categories():
-    """Load categories from MongoDB with their representative descriptions."""
-    default_categories = [
-        {"name": "Electronics", "description": "Devices like phones, laptops, and gadgets"},
-        {"name": "Fashion", "description": "Clothing, shoes, and accessories"},
-        {"name": "Home Goods", "description": "Furniture, decor, and household items"},
-        {"name": "Beauty", "description": "Cosmetics, skincare, and makeup products"},
-        {"name": "Sports", "description": "Sporting equipment and gear"},
-        {"name": "Books", "description": "Books, novels, and literature"},
-        {"name": "Groceries", "description": "Food and grocery items"},
-        {"name": "Vehicles", "description": "Cars, bikes, and vehicles"},
-        {"name": "Medicine", "description": "Medicines and health remedies"},
-        {"name": "Perfume", "description": "Fragrances, colognes, and perfumes"}
-    ]
-    stored_categories = categories_collection.find_one({"_id": "categories"})
-    if stored_categories and "categories" in stored_categories:
-        return stored_categories["categories"]
-    else:
-        categories_collection.insert_one({"_id": "categories", "categories": default_categories})
-        return default_categories
-
-def save_categories(categories):
-    """Save updated categories to MongoDB."""
-    categories_collection.update_one(
-        {"_id": "categories"},
-        {"$set": {"categories": categories}},
-        upsert=True
-    )
-
-def get_text_embedding(text):
-    """Generate embedding for a text using HF API"""
-    return get_embedding_with_hf_api(text)
-
-def propose_new_category(text, classification_results, existing_categories):
-    """Propose a general category using semantic similarity and keyword extraction."""
-    if not AI_MODELS_LOADED:
-        return "Miscellaneous"
-    
-    text = clean_text(text).lower()
-    
-    # Simple keyword extraction (replaces spaCy NER)
-    words = re.findall(r'\b[a-z]{4,}\b', text)
-    keywords = [word for word in words if word not in 
-               ['item', 'product', 'thing', 'restocked', 'detail', 'catch', 'new', 'sale']]
-    
-    # Generate embedding for the input text using API
-    text_embedding = get_text_embedding(text)
-    
-    # Compare with existing category descriptions
-    category_names = [cat["name"] for cat in existing_categories]
-    category_descriptions = [cat["description"] for cat in existing_categories]
-    
-    # Get embeddings for all category descriptions
-    category_embeddings = [get_text_embedding(desc) for desc in category_descriptions]
-    
-    # Calculate similarities
-    from sklearn.metrics.pairwise import cosine_similarity
-    similarities = cosine_similarity(text_embedding.reshape(1, -1), category_embeddings)[0]
-    max_similarity = max(similarities) if similarities.size > 0 else 0
-    best_category_idx = np.argmax(similarities) if similarities.size > 0 else -1
-    
-    # If similarity is high enough, use the closest existing category
-    if max_similarity > 0.7:  # Adjustable threshold
-        return category_names[best_category_idx]
-    
-    # If keywords exist, use the first one as a new category
-    if keywords:
-        new_category = keywords[0].capitalize()
-        # Avoid overly specific categories by checking against existing ones
-        for cat in existing_categories:
-            if new_category.lower() in cat["description"].lower():
-                return cat["name"]
-        return new_category
-    
-    # Fallback to classifier's top category
-    if classification_results and classification_results["labels"]:
-        return classification_results["labels"][0]
-    
-    return "Miscellaneous"
-
-def enrich_product(title, desc):
-    """AI enrichment function for product categorization and summarization using HF API"""
-    if not AI_MODELS_LOADED:
-        return "Unknown", desc[:80] if desc else title[:80]
-    
-    text = desc if isinstance(desc, str) and len(desc) > 10 else title
-    text = clean_text(text)
-
-    # Load current categories
-    categories = load_categories()
-    category_names = [cat["name"] for cat in categories]
-
-    # Category classification using HF API
-    try:
-        classification = classify_with_hf_api(text, category_names)
-        if classification:
-            top_category = classification["labels"][0]
-            top_score = classification["scores"][0]
-
-            # Use semantic similarity for unseen data
-            new_category = propose_new_category(text, classification, categories)
-            if new_category not in category_names:
-                # Add new category with a description
-                new_cat_description = text[:100]  # Use first 100 chars as description
-                categories.append({"name": new_category, "description": new_cat_description})
-                save_categories(categories)
-                print(f"📚 Added new category: {new_category}")
-            category = new_category
-        else:
-            # Fallback to simple categorization
-            category = simple_category_detection(text)
-    except Exception as e:
-        print(f"⚠️ Classification error: {e}")
-        category = simple_category_detection(text)
-
-    # Summarized description using HF API
-    try:
-        if len(text) > 50:
-            summary = summarize_with_hf_api(text)
-        else:
-            summary = text
-    except Exception as e:
-        print(f"⚠️ Summarization error: {e}")
-        summary = text[:80]
-
-    return category, summary
-
+def error_handler(update, context):
+    """Handle errors including Conflict errors"""
+    if isinstance(context.error, Conflict):
+        print("❌ Conflict error detected - another bot instance might be running")
+        return
+    print(f'❌ Update "{update}" caused error "{context.error}"')
 # === 🔄 AWS S3 File Management Functions (S3 ONLY) ===
-# [Keep all your existing S3 file management functions exactly as they are]
 def file_exists_in_s3(s3_key):
     """Efficiently check if file exists in S3 using head_object (no download)"""
     try:
@@ -536,6 +449,49 @@ def ensure_s3_structure():
         print("✅ Created data/ folder in S3")
     except Exception:
         print("✅ data/ folder already exists in S3")
+
+# === 🧹 Text cleaning and extraction helpers ===
+def clean_text(text):
+    return ' '.join(text.replace('\xa0', ' ').split())
+
+def extract_info(text, message_id):
+    text = clean_text(text)
+    
+    title_match = re.split(r'\n|💸|☘️☘️PRICE|Price\s*:|💵', text)[0].strip()
+    title = title_match[:100] if title_match else "No Title"
+    
+    phone_matches = re.findall(r'(\+251\d{8,9}|09\d{8})', text)
+    phone = phone_matches[0] if phone_matches else ""
+    
+    price_match = re.search(
+        r'(Price|💸|☘️☘️PRICE)[:\s]*([\d,]+)|([\d,]+)\s*(ETB|Birr|birr|💵)', 
+        text, 
+        re.IGNORECASE
+    )
+    price = ""
+    if price_match:
+        price = price_match.group(2) or price_match.group(3) or ""
+        price = price.replace(',', '').strip()
+    
+    location_match = re.search(
+        r'(📍|Address|Location|🌺🌺)[:\s]*(.+?)(?=\n|☘️|📞|@|$)', 
+        text, 
+        re.IGNORECASE
+    )
+    location = location_match.group(2).strip() if location_match else ""
+    
+    channel_mention = re.search(r'(@\w+)', text)
+    channel_mention = channel_mention.group(1) if channel_mention else ""
+    
+    return {
+        "title": title,
+        "description": text,
+        "price": price,
+        "phone": phone,
+        "location": location,
+        "channel_mention": channel_mention,
+        "product_ref": str(message_id) 
+    }
 
 # ======================
 # Wrapper for command authorization
@@ -704,191 +660,6 @@ async def get_telethon_client():
                 return None
     
     return None
-
-# ======================
-# 7-day scraping function with AI ENRICHMENT and PURE S3 integration
-# ======================
-async def scrape_channel_7days_async(channel_username: str):
-    """Scrape last 7 days of data from a channel, apply AI enrichment, and store ONLY in S3"""
-    telethon_client = None
-    
-    try:
-        # Use direct S3 access for parquet data
-        print("🔍 Loading parquet data directly from S3...")
-        
-        telethon_client = await get_telethon_client()
-        if not telethon_client:
-            track_session_usage("scraping", False, "Failed to initialize client")
-            return False, "❌ Could not establish connection for scraping."
-        
-        print(f"🔍 Starting 7-day scrape for channel: {channel_username}")
-        
-        try:
-            entity = await telethon_client.get_entity(channel_username)
-            print(f"✅ Channel found: {entity.title}")
-        except (ChannelInvalidError, UsernameInvalidError, UsernameNotOccupiedError) as e:
-            track_session_usage("scraping", False, f"Invalid channel: {str(e)}")
-            return False, f"❌ Channel {channel_username} is invalid or doesn't exist."
-        
-        try:
-            target_entity = await telethon_client.get_entity(FORWARD_CHANNEL)
-            print(f"✅ Target channel resolved: {target_entity.title}")
-        except Exception as e:
-            track_session_usage("scraping", False, f"Target channel error: {str(e)}")
-            return False, f"❌ Could not resolve target channel: {str(e)}"
-        
-        now = datetime.now(timezone.utc)
-        cutoff = now - timedelta(days=7)
-        print(f"⏰ Scraping messages from last 7 days (since {cutoff})")
-        
-        source_messages = []
-        print(f"📡 Collecting messages from source channel: {channel_username}")
-        
-        async for message in telethon_client.iter_messages(entity, limit=None):
-            if not message.text:
-                continue
-            if message.date < cutoff:
-                break
-            source_messages.append({
-                'text': message.text,
-                'date': message.date,
-                'source_channel': channel_username,
-                'source_message_id': message.id
-            })
-        
-        print(f"📋 Collected {len(source_messages)} messages from source channel")
-        
-        scraped_data = []
-        message_count = 0
-        
-        print(f"🔍 Searching for matching messages in target channel...")
-        
-        async for message in telethon_client.iter_messages(target_entity, limit=None):
-            message_count += 1
-            if message_count % 50 == 0:
-                print(f"📊 Processed {message_count} messages in target channel...")
-            if message.date < cutoff:
-                print(f"⏹️ Reached 7-day cutoff at message {message_count}")
-                break
-            if not message.text:
-                continue
-
-            matching_source = None
-            for source_msg in source_messages:
-                if (source_msg['text'] in message.text or 
-                    message.text in source_msg['text'] or
-                    source_msg['text'][:100] in message.text):
-                    matching_source = source_msg
-                    break
-
-            if not matching_source:
-                continue
-
-            info = extract_info(message.text, message.id)
-            
-            # === 🤖 AI ENRICHMENT ===
-            print(f"🤖 Enriching product: {info['title'][:50]}...")
-            predicted_category, generated_description = enrich_product(info["title"], info["description"])
-            
-            if getattr(target_entity, "username", None):
-                post_link = f"https://t.me/{target_entity.username}/{message.id}"
-            else:
-                internal_id = str(target_entity.id)
-                if internal_id.startswith("-100"):
-                    internal_id = internal_id[4:]
-                post_link = f"https://t.me/c/{internal_id}/{message.id}"
-
-            post_data = {
-                "title": info["title"],
-                "description": info["description"],
-                "price": info["price"],
-                "phone": info["phone"],
-                "location": info["location"],
-                "date": message.date.strftime("%Y-%m-%d %H:%M:%S"),
-                "channel": channel_username,
-                "post_link": post_link,
-                "product_ref": str(message.id),
-                "scraped_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                # === 🤖 AI ENRICHMENT FIELDS ===
-                "predicted_category": predicted_category,
-                "generated_description": generated_description
-            }
-            scraped_data.append(post_data)
-        
-        print(f"📋 Found {len(scraped_data)} matching messages in target channel")
-        
-        # Load existing data DIRECTLY FROM S3
-        existing_df = load_parquet_from_s3()
-        if existing_df is None:
-            existing_df = pd.DataFrame()
-        
-        print(f"📁 Loaded existing data with {len(existing_df)} records from S3")
-        
-        new_df = pd.DataFrame(scraped_data)
-        if not new_df.empty:
-            # Combine and deduplicate
-            combined_df = pd.concat([existing_df, new_df], ignore_index=True)
-            combined_df = combined_df.drop_duplicates(subset=['product_ref', 'channel'], keep='last')
-            
-            # Save ONLY to S3
-            success = save_parquet_to_s3(combined_df)
-            if success:
-                print(f"💾 Saved {len(combined_df)} total records to S3")
-                new_count = len(combined_df) - len(existing_df)
-                
-                # === 🤖 AI ENRICHMENT SUMMARY ===
-                if AI_MODELS_LOADED and 'predicted_category' in combined_df.columns:
-                    category_counts = combined_df['predicted_category'].value_counts()
-                    print("\n📈 AI Enrichment Summary:")
-                    for category, count in category_counts.items():
-                        print(f"  {category}: {count} products")
-                
-                track_session_usage("scraping", True, f"Scraped {len(scraped_data)} messages")
-                return True, f"✅ Scraped {len(scraped_data)} messages from {channel_username}. Added {new_count} new records to database."
-            else:
-                track_session_usage("scraping", False, "S3 save failed")
-                return False, f"❌ Failed to save scraped data for {channel_username} to S3."
-        else:
-            track_session_usage("scraping", True, "No new messages found")
-            return False, f"📭 No matching messages found in target channel for {channel_username} in the last 7 days."
-            
-    except Exception as e:
-        error_msg = f"Scraping error: {str(e)}"
-        print(f"❌ {error_msg}")
-        import traceback
-        print(f"🔍 Full traceback: {traceback.format_exc()}")
-        track_session_usage("scraping", False, error_msg)
-        return False, f"❌ Scraping error: {str(e)}"
-    finally:
-        if telethon_client:
-            try:
-                await telethon_client.disconnect()
-                # Upload session file to S3 after operations
-                print("📤 Uploading updated session file to S3...")
-                if os.path.exists(USER_SESSION_FILE):
-                    with open(USER_SESSION_FILE, 'rb') as f:
-                        s3.put_object(
-                            Bucket=AWS_BUCKET_NAME,
-                            Key=f"sessions/{USER_SESSION_FILE}",
-                            Body=f.read()
-                        )
-                    print(f"✅ Session file uploaded to S3: {USER_SESSION_FILE}")
-                    # Clean up temporary file
-                    os.remove(USER_SESSION_FILE)
-            except Exception as e:
-                print(f"⚠️ Error during cleanup: {e}")
-
-def scrape_channel_7days_sync(channel_username: str):
-    """Synchronous wrapper for 7-day scraping with AI enrichment"""
-    try:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        result = loop.run_until_complete(scrape_channel_7days_async(channel_username))
-        loop.close()
-        return result
-    except Exception as e:
-        track_session_usage("scraping", False, f"Sync error: {str(e)}")
-        return False, f"❌ Scraping error: {str(e)}"
 
 # ======================
 # Forward last 7d posts with PURE S3 integration
@@ -1130,6 +901,86 @@ def setup_session(update, context):
     threading.Thread(target=run_session_setup, daemon=True).start()
 
 @authorized
+def debug_parquet_comprehensive(update, context):
+    """Comprehensive debug command to check S3 parquet files"""
+    try:
+        s3_key = f"data/{scraped_7d}"
+        
+        msg = f"🔍 <b>Comprehensive Parquet Debug (S3 ONLY)</b>\n\n"
+        
+        # Check S3 file
+        s3_exists = file_exists_in_s3(s3_key)
+        msg += f"☁️ <b>S3 Status:</b> {'✅ Exists' if s3_exists else '❌ Missing'}\n"
+        
+        if s3_exists:
+            try:
+                response = s3.head_object(Bucket=AWS_BUCKET_NAME, Key=s3_key)
+                s3_size = response['ContentLength']
+                s3_modified = response['LastModified']
+                msg += f"📏 <b>S3 Size:</b> {s3_size} bytes\n"
+                msg += f"🕒 <b>S3 Modified:</b> {s3_modified}\n"
+                
+                # Try to load S3 data
+                s3_df = load_parquet_from_s3()
+                if not s3_df.empty:
+                    msg += f"📊 <b>S3 Data:</b> {len(s3_df)} records\n"
+                else:
+                    msg += "⚠️ S3 file exists but contains no data\n"
+            except Exception as e:
+                msg += f"❌ <b>S3 Error:</b> {e}\n"
+        
+        # Data summary if available
+        if not s3_df.empty:
+            msg += f"\n📈 <b>Data Summary:</b>\n"
+            msg += f"• Total Records: {len(s3_df)}\n"
+            msg += f"• Date Range: {s3_df['date'].min() if 'date' in s3_df.columns else 'N/A'} to {s3_df['date'].max() if 'date' in s3_df.columns else 'N/A'}\n"
+            msg += f"• Channels: {s3_df['channel'].nunique() if 'channel' in s3_df.columns else 'N/A'}\n"
+            
+            if 'channel' in s3_df.columns:
+                msg += f"\n🔍 <b>Top Channels:</b>\n"
+                channel_counts = s3_df['channel'].value_counts().head(3)
+                for channel, count in channel_counts.items():
+                    msg += f"• {channel}: {count} records\n"
+        
+        update.message.reply_text(msg, parse_mode="HTML")
+        
+    except Exception as e:
+        update.message.reply_text(f"❌ Comprehensive debug error: {e}")
+
+@authorized
+def test_s3_write(update, context):
+    """Test S3 write functionality with a small sample"""
+    try:
+        # Create test data
+        test_data = {
+            "title": ["Test Product"],
+            "description": ["Test Description"],
+            "price": ["100"],
+            "phone": ["+251911223344"],
+            "location": ["Test Location"],
+            "date": [datetime.now().strftime("%Y-%m-%d %H:%M:%S")],
+            "channel": ["@testchannel"],
+            "post_link": ["https://t.me/test/1"],
+            "product_ref": ["test123"],
+            "scraped_at": [datetime.now().strftime("%Y-%m-%d %H:%M:%S")]
+        }
+        
+        test_df = pd.DataFrame(test_data)
+        
+        update.message.reply_text("🧪 Testing S3 write functionality...")
+        
+        # Test the save function
+        success = save_parquet_to_s3(test_df)
+        
+        if success:
+            update.message.reply_text("✅ S3 write test PASSED!")
+        else:
+            update.message.reply_text("❌ S3 write test FAILED!")
+            
+    except Exception as e:
+        update.message.reply_text(f"❌ S3 write test error: {e}")
+
+@authorized
 def check_session(update, context):
     """Check if the user session is valid"""
     def run_check():
@@ -1168,31 +1019,654 @@ def check_session(update, context):
     
     threading.Thread(target=run_check, daemon=True).start()
 
-# [Keep all your existing bot commands exactly as they are - they will work with the new AI setup]
+@authorized
+def check_session_usage(update, context):
+    """Check session usage statistics and health"""
+    try:
+        stats = get_session_usage_stats()
+        if not stats:
+            update.message.reply_text("❌ Could not retrieve session usage statistics.")
+            return
+        
+        msg = f"📊 <b>Session Usage Statistics (Last 24h)</b>\n\n"
+        msg += f"🔧 <b>Current Session:</b> {stats['current_session']}\n"
+        msg += f"🌍 <b>Environment:</b> {stats['current_environment']}\n"
+        msg += f"💻 <b>Computer:</b> {platform.node()}\n"
+        msg += f"☁️ <b>S3 Bucket:</b> {AWS_BUCKET_NAME}\n\n"
+        
+        msg += f"📈 <b>Operations Summary:</b>\n"
+        msg += f"• Total Operations: {stats['total_operations']}\n"
+        msg += f"• Successful: {stats['successful_operations']}\n"
+        msg += f"• Failed: {stats['failed_operations']}\n"
+        msg += f"• Success Rate: {stats['success_rate']:.1f}%\n\n"
+        
+        msg += f"🌍 <b>Environment Usage:</b>\n"
+        for env, count in stats['environment_usage'].items():
+            msg += f"• {env}: {count} operations\n"
+        
+        if stats['recent_errors']:
+            msg += f"\n⚠️ <b>Recent Errors (last 5):</b>\n"
+            for error in stats['recent_errors']:
+                timestamp = error['timestamp'].strftime("%H:%M:%S")
+                operation = error['operation']
+                error_msg = error['error_message'][:50] + "..." if len(error['error_message']) > 50 else error['error_message']
+                msg += f"• {timestamp} - {operation}: {error_msg}\n"
+        
+        # Add health status
+        if stats['success_rate'] >= 90:
+            health = "🟢 Excellent"
+        elif stats['success_rate'] >= 75:
+            health = "🟡 Good"
+        elif stats['success_rate'] >= 50:
+            health = "🟠 Fair"
+        else:
+            health = "🔴 Poor"
+            
+        msg += f"\n❤️ <b>Health Status:</b> {health}"
+        
+        update.message.reply_text(msg, parse_mode="HTML")
+        
+    except Exception as e:
+        update.message.reply_text(f"❌ Error checking session usage: {e}")
 
-# Remove model-related commands since we don't have local models anymore
-@authorized  
-def model_checker(update, context):
-    """Check AI models status (now using HF API)"""
-    msg = "🔍 <b>AI Models Status (Hugging Face Inference API)</b>\n\n"
-    msg += "• Zero-shot Classification: ✅ Available\n"
-    msg += "• Text Summarization: ✅ Available\n"
-    msg += "• Sentence Embeddings: ✅ Available\n"
-    msg += "• Models Hosted: Hugging Face (remote)\n"
-    msg += "• Local Storage: 0 GB (no models stored locally)\n"
-    msg += f"• API Token: {'✅ Set' if HF_API_TOKEN else '⚠️ Not set (using public access)'}"
+# ======================
+# 7-day scraping function with PURE S3 integration
+# ======================
+async def scrape_channel_7days_async(channel_username: str):
+    """Scrape last 7 days of data from a channel with AI enrichment"""
+    telethon_client = None
     
-    update.message.reply_text(msg, parse_mode="HTML")
+    try:
+        print("🔍 Loading parquet data directly from S3...")
+        
+        telethon_client = await get_telethon_client()
+        if not telethon_client:
+            track_session_usage("scraping", False, "Failed to initialize client")
+            return False, "❌ Could not establish connection for scraping."
+        
+        print(f"🔍 Starting 7-day scrape with AI enrichment for channel: {channel_username}")
+        
+        try:
+            entity = await telethon_client.get_entity(channel_username)
+            print(f"✅ Channel found: {entity.title}")
+        except (ChannelInvalidError, UsernameInvalidError, UsernameNotOccupiedError) as e:
+            track_session_usage("scraping", False, f"Invalid channel: {str(e)}")
+            return False, f"❌ Channel {channel_username} is invalid or doesn't exist."
+        
+        try:
+            target_entity = await telethon_client.get_entity(FORWARD_CHANNEL)
+            print(f"✅ Target channel resolved: {target_entity.title}")
+        except Exception as e:
+            track_session_usage("scraping", False, f"Target channel error: {str(e)}")
+            return False, f"❌ Could not resolve target channel: {str(e)}"
+        
+        now = datetime.now(timezone.utc)
+        cutoff = now - timedelta(days=7)
+        print(f"⏰ Scraping messages from last 7 days (since {cutoff})")
+        
+        source_messages = []
+        print(f"📡 Collecting messages from source channel: {channel_username}")
+        
+        async for message in telethon_client.iter_messages(entity, limit=None):
+            if not message.text:
+                continue
+            if message.date < cutoff:
+                break
+            source_messages.append({
+                'text': message.text,
+                'date': message.date,
+                'source_channel': channel_username,
+                'source_message_id': message.id
+            })
+        
+        print(f"📋 Collected {len(source_messages)} messages from source channel")
+        
+        scraped_data = []
+        message_count = 0
+        
+        print(f"🔍 Searching for matching messages in target channel...")
+        
+        async for message in telethon_client.iter_messages(target_entity, limit=None):
+            message_count += 1
+            if message_count % 50 == 0:
+                print(f"📊 Processed {message_count} messages in target channel...")
+            if message.date < cutoff:
+                print(f"⏹️ Reached 7-day cutoff at message {message_count}")
+                break
+            if not message.text:
+                continue
 
-# Update the main function to reflect the change
+            matching_source = None
+            for source_msg in source_messages:
+                if (source_msg['text'] in message.text or 
+                    message.text in source_msg['text'] or
+                    source_msg['text'][:100] in message.text):
+                    matching_source = source_msg
+                    break
+
+            if not matching_source:
+                continue
+
+            info = extract_info(message.text, message.id)
+            
+            # 🔥 AI ENHANCEMENT: Add category and summary
+            print(f"🤖 AI enriching product: {info['title'][:50]}...")
+            predicted_category, generated_description = enrich_product_with_ai(info["title"], info["description"])
+            
+            if getattr(target_entity, "username", None):
+                post_link = f"https://t.me/{target_entity.username}/{message.id}"
+            else:
+                internal_id = str(target_entity.id)
+                if internal_id.startswith("-100"):
+                    internal_id = internal_id[4:]
+                post_link = f"https://t.me/c/{internal_id}/{message.id}"
+
+            post_data = {
+                "title": info["title"],
+                "description": info["description"],
+                "price": info["price"],
+                "phone": info["phone"],
+                "location": info["location"],
+                "date": message.date.strftime("%Y-%m-%d %H:%M:%S"),
+                "channel": channel_username,
+                "post_link": post_link,
+                "product_ref": str(message.id),
+                "scraped_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                # 🔥 NEW AI FIELDS
+                "predicted_category": predicted_category,
+                "generated_description": generated_description,
+                "ai_enhanced": True
+            }
+            scraped_data.append(post_data)
+        
+        print(f"📋 Found {len(scraped_data)} matching messages with AI enhancement")
+        
+        # Load existing data DIRECTLY FROM S3
+        existing_df = load_parquet_from_s3()
+        if existing_df is None:
+            existing_df = pd.DataFrame()
+        
+        print(f"📁 Loaded existing data with {len(existing_df)} records from S3")
+        
+        new_df = pd.DataFrame(scraped_data)
+        if not new_df.empty:
+            # Combine and deduplicate
+            combined_df = pd.concat([existing_df, new_df], ignore_index=True)
+            combined_df = combined_df.drop_duplicates(subset=['product_ref', 'channel'], keep='last')
+            
+            # Save ONLY to S3
+            success = save_parquet_to_s3(combined_df)
+            if success:
+                print(f"💾 Saved {len(combined_df)} total records to S3 with AI enhancement")
+                
+                # Print AI enhancement summary
+                category_counts = new_df['predicted_category'].value_counts()
+                print("🤖 AI Enhancement Summary:")
+                for category, count in category_counts.head(5).items():
+                    print(f"  • {category}: {count} products")
+                
+                new_count = len(combined_df) - len(existing_df)
+                track_session_usage("scraping", True, f"Scraped {len(scraped_data)} messages with AI")
+                return True, f"✅ Scraped {len(scraped_data)} messages from {channel_username}. Added {new_count} new AI-enhanced records to database."
+            else:
+                track_session_usage("scraping", False, "S3 save failed")
+                return False, f"❌ Failed to save AI-enhanced data for {channel_username} to S3."
+        else:
+            track_session_usage("scraping", True, "No new messages found")
+            return False, f"📭 No matching messages found in target channel for {channel_username} in the last 7 days."
+            
+    except Exception as e:
+        error_msg = f"Scraping error: {str(e)}"
+        print(f"❌ {error_msg}")
+        import traceback
+        print(f"🔍 Full traceback: {traceback.format_exc()}")
+        track_session_usage("scraping", False, error_msg)
+        return False, f"❌ Scraping error: {str(e)}"
+    finally:
+        if telethon_client:
+            try:
+                await telethon_client.disconnect()
+                # Upload session file to S3 after operations
+                print("📤 Uploading updated session file to S3...")
+                if os.path.exists(USER_SESSION_FILE):
+                    with open(USER_SESSION_FILE, 'rb') as f:
+                        s3.put_object(
+                            Bucket=AWS_BUCKET_NAME,
+                            Key=f"sessions/{USER_SESSION_FILE}",
+                            Body=f.read()
+                        )
+                    print(f"✅ Session file uploaded to S3: {USER_SESSION_FILE}")
+                    # Clean up temporary file
+                    os.remove(USER_SESSION_FILE)
+            except Exception as e:
+                print(f"⚠️ Error during cleanup: {e}")
+
+def scrape_channel_7days_sync(channel_username: str):
+    """Synchronous wrapper for 7-day scraping"""
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        result = loop.run_until_complete(scrape_channel_7days_async(channel_username))
+        loop.close()
+        return result
+    except Exception as e:
+        track_session_usage("scraping", False, f"Sync error: {str(e)}")
+        return False, f"❌ Scraping error: {str(e)}"
+
+# ======================
+# Bot commands (remain the same but now use pure S3 functions)
+# ======================
+@authorized
+def add_channel(update, context):
+    if len(context.args) == 0:
+        update.message.reply_text("⚡ Usage: /addchannel @ChannelUsername")
+        return
+
+    username = context.args[0].strip()
+    if not username.startswith("@"):
+        update.message.reply_text("❌ Please provide a valid channel username starting with @")
+        return
+
+    if channels_collection.find_one({"username": username}):
+        update.message.reply_text("⚠️ This channel is already saved in the database.")
+        return
+
+    try:
+        chat = context.bot.get_chat(username)
+        channels_collection.insert_one({"username": username, "title": chat.title})
+        update.message.reply_text(
+            f"✅ <b>Channel saved successfully!</b>\n\n"
+            f"📌 <b>Name:</b> {chat.title}\n"
+            f"🔗 <b>Username:</b> {username}",
+            parse_mode="HTML",
+        )
+
+        # Run operations in CORRECT ORDER
+        def run_operations():
+            try:
+                # FIRST: Forward messages to target channel
+                update.message.reply_text(f"⏳ Forwarding last 7d posts from {username}...")
+                success, result_msg = forward_last_7d_sync(username)
+                context.bot.send_message(update.effective_chat.id, text=result_msg, parse_mode="HTML")
+                
+                # Add delay to ensure forwarding completes
+                import time
+                time.sleep(3)
+                
+                # THEN: Scrape from target channel (now messages exist there)
+                update.message.reply_text(f"⏳ Starting 7-day data scraping from {username}...")
+                success, result_msg = scrape_channel_7days_sync(username)
+                context.bot.send_message(update.effective_chat.id, text=result_msg, parse_mode="HTML")
+                
+            except Exception as e:
+                error_msg = f"❌ Error during operations: {str(e)}"
+                context.bot.send_message(update.effective_chat.id, text=error_msg, parse_mode="HTML")
+
+        threading.Thread(target=run_operations, daemon=True).start()
+
+    except BadRequest as e:
+        update.message.reply_text(f"❌ Could not add channel: {str(e)}")
+    except Exception as e:
+        update.message.reply_text(f"❌ Unexpected error: {str(e)}")
+@authorized
+def debug_s3_parquet(update, context):
+    """Enhanced debug command to check S3 parquet file status"""
+    try:
+        s3_key = f"data/{scraped_7d}"
+        
+        # Check if file exists in S3
+        exists = file_exists_in_s3(s3_key)
+        msg = f"🔍 <b>S3 Parquet Debug Information</b>\n\n"
+        msg += f"📁 <b>S3 Path:</b> {s3_key}\n"
+        msg += f"✅ <b>File Exists:</b> {'Yes' if exists else 'No'}\n\n"
+        
+        if exists:
+            # Get file info
+            try:
+                response = s3.head_object(Bucket=AWS_BUCKET_NAME, Key=s3_key)
+                size_mb = response['ContentLength'] / (1024 * 1024)
+                last_modified = response['LastModified']
+                msg += f"📏 <b>File Size:</b> {size_mb:.2f} MB\n"
+                msg += f"🕒 <b>Last Modified:</b> {last_modified}\n\n"
+            except Exception as e:
+                msg += f"⚠️ <b>File Info Error:</b> {e}\n\n"
+            
+            # Try to load and show data
+            try:
+                df = load_parquet_from_s3()
+                if not df.empty:
+                    msg += f"📊 <b>Data Summary:</b>\n"
+                    msg += f"• Total Records: {len(df)}\n"
+                    msg += f"• Date Range: {df['date'].min()} to {df['date'].max()}\n"
+                    msg += f"• Channels: {df['channel'].nunique()}\n\n"
+                    
+                    msg += f"🔍 <b>Channel Distribution:</b>\n"
+                    channel_counts = df['channel'].value_counts()
+                    for channel, count in channel_counts.head(5).items():
+                        msg += f"• {channel}: {count} records\n"
+                else:
+                    msg += "⚠️ File exists but contains no data\n"
+            except Exception as e:
+                msg += f"❌ <b>Data Load Error:</b> {e}\n"
+        else:
+            msg += "💡 <b>Solution:</b> Run scraping to create the file\n"
+        
+        update.message.reply_text(msg, parse_mode="HTML")
+        
+    except Exception as e:
+        update.message.reply_text(f"❌ Debug error: {e}")
+@authorized
+def check_scraped_data(update, context):
+    """Check the current scraped data statistics from S3 with AI insights"""
+    try:
+        df = load_parquet_from_s3()
+        if not df.empty:
+            channel_counts = df['channel'].value_counts()
+            
+            msg = f"📊 <b>Scraped Data Summary (AI Enhanced):</b>\n"
+            msg += f"Total records: {len(df)}\n"
+            
+            # AI Enhancement stats
+            if 'predicted_category' in df.columns:
+                ai_enhanced_count = df['ai_enhanced'].sum() if 'ai_enhanced' in df.columns else len(df)
+                unique_categories = df['predicted_category'].nunique()
+                msg += f"AI Enhanced: {ai_enhanced_count} records\n"
+                msg += f"Unique Categories: {unique_categories}\n\n"
+            
+            msg += "<b>Records per channel:</b>\n"
+            for channel, count in channel_counts.items():
+                msg += f"• {channel}: {count} records\n"
+            
+            # Show top categories if available
+            if 'predicted_category' in df.columns:
+                msg += f"\n<b>Top Categories:</b>\n"
+                category_counts = df['predicted_category'].value_counts().head(5)
+                for category, count in category_counts.items():
+                    msg += f"• {category}: {count} products\n"
+                
+            update.message.reply_text(msg, parse_mode="HTML")
+        else:
+            update.message.reply_text("📭 No scraped data found in S3 yet.")
+    except Exception as e:
+        update.message.reply_text(f"❌ Error checking scraped data: {e}")
+@authorized
+def list_channels(update, context):
+    channels = list(channels_collection.find({}))
+    if not channels:
+        update.message.reply_text("📭 No channels saved yet.")
+        return
+
+    msg_lines = ["📃 <b>Saved Channels:</b>\n"]
+    for ch in channels:
+        username = ch.get("username")
+        title = ch.get("title", "Unknown")
+        msg_lines.append(f"{username} — <b>{title}</b>")
+
+    msg = "\n".join(msg_lines)
+    for chunk in [msg[i : i + 4000] for i in range(0, len(msg), 4000)]:
+        update.message.reply_text(chunk, parse_mode="HTML")
+
+@authorized
+def check_channel(update, context):
+    if len(context.args) == 0:
+        update.message.reply_text("⚡ Usage: /checkchannel @ChannelUsername")
+        return
+
+    username = context.args[0].strip()
+    if not username.startswith("@"):
+        update.message.reply_text("❌ Please provide a valid channel username starting with @")
+        return
+
+    doc = channels_collection.find_one({"username": username})
+    if doc:
+        update.message.reply_text(
+            f"🔍 <b>Channel found in database!</b>\n\n"
+            f"📌 <b>Name:</b> {doc.get('title', 'Unknown')}\n"
+            f"🔗 <b>Username:</b> {username}",
+            parse_mode="HTML",
+        )
+    else:
+        update.message.reply_text(f"❌ Channel {username} is not in the database.", parse_mode="HTML")
+
+@authorized
+def delete_channel(update, context):
+    if len(context.args) == 0:
+        update.message.reply_text("⚡ Usage: /deletechannel @ChannelUsername")
+        return
+
+    username = context.args[0].strip()
+    if not username.startswith("@"):
+        update.message.reply_text("❌ Please provide a valid channel username starting with @")
+        return
+
+    result = channels_collection.delete_one({"username": username})
+    if result.deleted_count > 0:
+        update.message.reply_text(f"✅ Channel {username} has been deleted from the database.")
+    else:
+        update.message.reply_text(f"⚠️ Channel {username} was not found in the database.")
+
+@authorized
+def check_s3_status(update, context):
+    """Check S3 bucket and file status efficiently"""
+    try:
+        # Test S3 connection
+        try:
+            s3.head_bucket(Bucket=AWS_BUCKET_NAME)
+            bucket_status = "✅ Connected"
+        except Exception as e:
+            bucket_status = f"❌ Error: {e}"
+        
+        # Check files efficiently
+        files_status = check_s3_files_status()
+        
+        msg = f"☁️ <b>S3 Status Report (Efficient Check)</b>\n\n"
+        msg += f"<b>Bucket Connection:</b> {bucket_status}\n"
+        msg += f"<b>Bucket Name:</b> {AWS_BUCKET_NAME}\n\n"
+        
+        msg += f"<b>File Status (using head_object):</b>\n"
+        for file_type, exists in files_status.items():
+            status = "✅ Exists" if exists else "❌ Missing"
+            msg += f"• {file_type}: {status}\n"
+        
+        # Add folder structure info
+        msg += f"\n<b>Expected S3 Structure:</b>\n"
+        msg += f"• {AWS_BUCKET_NAME}/\n"
+        msg += f"  ├── sessions/\n"
+        msg += f"  │   └── {USER_SESSION_FILE}\n"
+        msg += f"  └── data/\n"
+        msg += f"      ├── {FORWARDED_FILE}\n"
+        msg += f"      └── {scraped_7d}\n"
+        
+        update.message.reply_text(msg, parse_mode="HTML")
+        
+    except Exception as e:
+        update.message.reply_text(f"❌ Error checking S3 status: {e}")
+
+@authorized
+def unknown_command(update, context):
+    update.message.reply_text(
+        "❌ Unknown command.\n\n"
+        "👉 Available commands:\n"
+        "/addchannel @ChannelUsername\n"
+        "/listchannels\n"
+        "/checkchannel @ChannelUsername\n"
+        "/deletechannel @ChannelUsername\n"
+        "/setup_session - Set up Telegram session\n"
+        "/check_session - Check session status\n"
+        "/checksessionusage - Session usage stats\n"
+        "/test - Test connection\n"
+        "/check_data - Check scraped data\n"
+        "/check_s3 - Check S3 status\n"
+        "/cleanup - Cleanup sessions\n"
+        "/clearhistory - Clear forwarded history"
+        "/debug_parquet - Debug parquet file in S3"
+    )
+
+@authorized
+def test_connection(update, context):
+    """Test if Telethon client is working with S3"""
+    def run_test():
+        try:
+            async def test_async():
+                client = None
+                try:
+                    # Test S3 connection first
+                    try:
+                        s3.head_bucket(Bucket=AWS_BUCKET_NAME)
+                        s3_status = "✅ S3 connection successful"
+                    except Exception as e:
+                        s3_status = f"❌ S3 connection failed: {e}"
+                    
+                    client = await get_telethon_client()
+                    if not client:
+                        return f"{s3_status}\n❌ Could not establish Telethon connection."
+                    
+                    me = await client.get_me()
+                    result = f"{s3_status}\n✅ Telethon connected as: {me.first_name} (@{me.username})\n\n"
+                    
+                    try:
+                        target = await client.get_entity(FORWARD_CHANNEL)
+                        result += f"✅ Target channel accessible: {target.title}"
+                    except Exception as e:
+                        result += f"❌ Cannot access target channel {FORWARD_CHANNEL}: {e}"
+                    
+                    track_session_usage("test", True)
+                    return result
+                except Exception as e:
+                    error_msg = f"Telethon connection error: {e}"
+                    track_session_usage("test", False, error_msg)
+                    return f"❌ {error_msg}"
+                finally:
+                    if client:
+                        await client.disconnect()
+                    # Clean up temporary session file
+                    if os.path.exists(USER_SESSION_FILE):
+                        os.remove(USER_SESSION_FILE)
+            
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            result = loop.run_until_complete(test_async())
+            loop.close()
+            
+            context.bot.send_message(update.effective_chat.id, text=result)
+            
+        except Exception as e:
+            context.bot.send_message(update.effective_chat.id, text=f"❌ Test failed: {e}")
+    
+    threading.Thread(target=run_test, daemon=True).start()
+
+@authorized
+def cleanup_sessions(update, context):
+    """Clean up all temporary Telethon session files (except main user session)"""
+    try:
+        cleanup_telethon_sessions()
+        update.message.reply_text("✅ All temporary session files have been cleaned up.")
+    except Exception as e:
+        update.message.reply_text(f"❌ Error cleaning up sessions: {e}")
+
+@authorized
+def clear_forwarded_history(update, context):
+    """Clear the forwarded messages history from S3"""
+    try:
+        # Delete the forwarded file from S3
+        try:
+            s3.delete_object(Bucket=AWS_BUCKET_NAME, Key=f"data/{FORWARDED_FILE}")
+            update.message.reply_text("✅ Forwarded messages history cleared from S3.")
+        except Exception as e:
+            update.message.reply_text(f"❌ Error clearing history from S3: {e}")
+    except Exception as e:
+        update.message.reply_text(f"❌ Error clearing history: {e}")
+
+@authorized
+def diagnose_session(update, context):
+    """Diagnose session issues"""
+    try:
+        # Check S3 file only
+        s3_exists = file_exists_in_s3(f"sessions/{USER_SESSION_FILE}")
+        
+        msg = f"🔍 <b>Session Diagnosis (S3 ONLY)</b>\n\n"
+        msg += f"📁 <b>Session File:</b> {USER_SESSION_FILE}\n"
+        msg += f"☁️ <b>S3 Exists:</b> {'✅' if s3_exists else '❌'}\n\n"
+        
+        if not s3_exists:
+            msg += "❌ <b>Problem:</b> No session file exists in S3!\n"
+            msg += "💡 <b>Solution:</b> Run /setup_session to create session\n"
+        else:
+            msg += "🔧 <b>Problem:</b> Session exists but may not be authorized\n"
+            msg += "💡 <b>Solution:</b> Run /check_session to verify\n"
+        
+        update.message.reply_text(msg, parse_mode="HTML")
+        
+    except Exception as e:
+        update.message.reply_text(f"❌ Diagnosis error: {e}")
+
+def start(update, context):
+    user_id = update.effective_user.id
+    if auth_collection.find_one({"user_id": user_id}):
+        update.message.reply_text(
+            "✅ You are already authorized!\n\n"
+            "Available commands:\n"
+            "/addchannel @ChannelUsername\n"
+            "/listchannels\n"
+            "/checkchannel @ChannelUsername\n"
+            "/deletechannel @ChannelUsername\n"
+            "/setup_session - Set up Telegram session (first time)\n"
+            "/check_session - Check session status\n"
+            "/checksessionusage - Session usage statistics\n"
+            "/test - Test connection\n"
+            "/check_data - Check scraped data\n"
+            "/check_s3 - Check S3 status\n"
+            "/cleanup - Cleanup sessions\n"
+            "/clearhistory - Clear forwarded history"
+            "/debug_parquet - debug_parquet that is in the s3 bucket"
+        )
+    else:
+        update.message.reply_text(
+            "⚡ Welcome! Please enter your access code using /code YOUR_CODE"
+        )
+
+def code(update, context):
+    user_id = update.effective_user.id
+    if auth_collection.find_one({"user_id": user_id}):
+        update.message.reply_text("✅ You are already authorized!")
+        return
+
+    if len(context.args) == 0:
+        update.message.reply_text("⚠️ Usage: /code YOUR_ACCESS_CODE")
+        return
+
+    entered_code = context.args[0].strip()
+    if entered_code == ADMIN_CODE:
+        auth_collection.insert_one({"user_id": user_id})
+        update.message.reply_text(
+            "✅ Code accepted! You can now use the bot commands.\n\n"
+            "⚠️ Important: Run /setup_session first to set up your Telegram session."
+        )
+    else:
+        update.message.reply_text("❌ Invalid code. Access denied.")
+
+# ======================
+# Main (S3 ONLY)
+# ======================
 def main():
-    from telegram.utils.request import Request
-    request = Request(connect_timeout=30, read_timeout=30, con_pool_size=8)
-    updater = Updater(BOT_TOKEN, use_context=True)
-    dp = updater.dispatcher
-    request=request
+    # Start Flask thread
+    threading.Thread(target=run_flask, daemon=True).start()
     
-    # [Keep all your existing handler registrations]
+    from telegram.utils.request import Request
+    from telegram.error import Conflict
+    
+    # ✅ FIX: Create Bot with Request instead of passing to Updater
+    request = Request(connect_timeout=30, read_timeout=30, con_pool_size=8)
+    bot = Bot(token=BOT_TOKEN, request=request)
+    
+    # ✅ FIX: Pass bot to Updater instead of token
+    updater = Updater(bot=bot, use_context=True)
+    dp = updater.dispatcher
+    
+    # Add error handler
+    dp.add_error_handler(error_handler)
+   
+    # All your existing handlers
     dp.add_handler(CommandHandler("start", start))
     dp.add_handler(CommandHandler("code", code))
     dp.add_handler(CommandHandler("addchannel", add_channel))
@@ -1211,15 +1685,12 @@ def main():
     dp.add_handler(CommandHandler("diagnose", diagnose_session))
     dp.add_handler(CommandHandler("debug_parquet", debug_s3_parquet))
     dp.add_handler(CommandHandler("test_s3_write", test_s3_write))
-    dp.add_handler(CommandHandler("modelchecker", model_checker))
     dp.add_handler(CommandHandler("debug_parquet_comprehensive", debug_parquet_comprehensive))
     
     print(f"🤖 Bot is running...")
     print(f"🔧 Using session file: {USER_SESSION_FILE}")
     print(f"🌍 Environment: {'render' if 'RENDER' in os.environ else 'local'}")
     print(f"☁️ S3 Bucket: {AWS_BUCKET_NAME}")
-    print(f"🤖 AI Models: ✅ Loaded (Hugging Face Inference API)")
-    print(f"💾 Local Model Storage: 0 GB")
     
     # Efficiently check all S3 files on startup
     print("\n🔍 Checking S3 files efficiently (using head_object)...")
@@ -1229,14 +1700,22 @@ def main():
     ensure_s3_structure()
     
     try:
-        updater.start_polling()
+        # ✅ FIX: Use improved start_polling with parameters
+        updater.start_polling(
+            timeout=10,
+            drop_pending_updates=True,
+            allowed_updates=['message', 'callback_query']
+        )
+        print("✅ Bot started successfully!")
         updater.idle()
+    except Conflict as e:
+        print(f"❌ Bot conflict error: {e}")
+        print("💡 Another bot instance might be running. Wait a few minutes and try again.")
     except KeyboardInterrupt:
         print("\n🛑 Shutting down bot...")
     except Exception as e:
         print(f"❌ Bot error: {e}")
     finally:
         print("👋 Bot stopped")
-
 if __name__ == "__main__":
     main()
