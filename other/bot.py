@@ -20,69 +20,8 @@ import threading
 import boto3
 import io
 import tempfile
-import shutil
-# === 🤖 AI Models Setup ===
-try:
-    from transformers import pipeline, AutoTokenizer, AutoModel
-    import spacy
-    from uuid import uuid4
-    import numpy as np
-    from sklearn.metrics.pairwise import cosine_similarity
-    
-    # Define models and their S3 prefixes
-    MODELS = {
-        'classifier': {
-            'pretrained': 'facebook/bart-large-mnli',
-            's3_prefix': 'models/facebook/bart-large-mnli/',
-            'is_pipeline': True,
-            'task': 'zero-shot-classification'
-        },
-        'summarizer': {
-            'pretrained': 'facebook/bart-large-cnn',
-            's3_prefix': 'models/facebook/bart-large-cnn/',
-            'is_pipeline': True,
-            'task': 'summarization'
-        },
-        'nlp': {
-            'pretrained': 'en_core_web_sm',
-            's3_prefix': 'models/en_core_web_sm/'
-        },
-        'tokenizer': {
-            'pretrained': 'sentence-transformers/all-MiniLM-L6-v2',
-            's3_prefix': 'models/sentence-transformers/all-MiniLM-L6-v2/tokenizer/',
-            'is_tokenizer': True
-        },
-        'embedder': {
-            'pretrained': 'sentence-transformers/all-MiniLM-L6-v2',
-            's3_prefix': 'models/sentence-transformers/all-MiniLM-L6-v2/model/'
-        }
-    }
-
-    # Save models to S3 if missing (runs once per model)
-    for name, info in MODELS.items():
-        if name == 'nlp':
-            save_spacy_model_to_s3(info['pretrained'], info['s3_prefix'])
-        else:
-            save_hf_model_to_s3(
-                info['pretrained'], 
-                info['s3_prefix'], 
-                is_pipeline=info.get('is_pipeline', False), 
-                pipeline_task=info.get('task')
-            )
-
-    # Models are now lazy-loaded in functions below (to avoid startup OOM)
-    classifier = None
-    summarizer = None
-    nlp = None
-    tokenizer = None
-    embedder = None
-    
-    AI_MODELS_LOADED = True
-    print("✅ AI models setup complete (will load from S3 on demand)")
-except Exception as e:
-    print(f"⚠️ AI models not loaded: {e}")
-    AI_MODELS_LOADED = False
-
+from telegram import Bot
+from telegram.error import BadRequest, Conflict  # Add Conflict to imports
 app = Flask(__name__)
 
 @app.route("/")
@@ -93,8 +32,6 @@ def home():
 def run_flask():
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
-
-threading.Thread(target=run_flask, daemon=True).start()
 
 # === 🔐 Load environment variables ===
 load_dotenv()
@@ -150,208 +87,12 @@ db = client["yetal"]
 channels_collection = db["yetalcollection"]
 auth_collection = db["authorized_users"]
 session_usage_collection = db["session_usage"]
-categories_collection = db["categories"]
-
-# === 🧹 Text cleaning and extraction helpers ===
-def clean_text(text: str) -> str:
-    if not isinstance(text, str):
-        return ""
-    # Remove URLs
-    text = re.sub(r"http\S+", "", text)
-    # Remove emojis and special characters
-    text = re.sub(r'[^\w\s,.]', '', text)
-    # Remove promotional and noise terms
-    text = re.sub(r'\b(restocked|detail|catch|new|sale|nishane|montale|phoera|libre|vanille)\b', '', text, flags=re.IGNORECASE)
-    # Remove extra whitespace
-    text = re.sub(r"\s+", " ", text)
-    return text.strip()
-
-def extract_info(text, message_id):
-    text = clean_text(text)
-    
-    title_match = re.split(r'\n|💸|☘️☘️PRICE|Price\s*:|💵', text)[0].strip()
-    title = title_match[:100] if title_match else "No Title"
-    
-    phone_matches = re.findall(r'(\+251\d{8,9}|09\d{8})', text)
-    phone = phone_matches[0] if phone_matches else ""
-    
-    price_match = re.search(
-        r'(Price|💸|☘️☘️PRICE)[:\s]*([\d,]+)|([\d,]+)\s*(ETB|Birr|birr|💵)', 
-        text, 
-        re.IGNORECASE
-    )
-    price = ""
-    if price_match:
-        price = price_match.group(2) or price_match.group(3) or ""
-        price = price.replace(',', '').strip()
-    
-    location_match = re.search(
-        r'(📍|Address|Location|🌺🌺)[:\s]*(.+?)(?=\n|☘️|📞|@|$)', 
-        text, 
-        re.IGNORECASE
-    )
-    location = location_match.group(2).strip() if location_match else ""
-    
-    channel_mention = re.search(r'(@\w+)', text)
-    channel_mention = channel_mention.group(1) if channel_mention else ""
-    
-    return {
-        "title": title,
-        "description": text,
-        "price": price,
-        "phone": phone,
-        "location": location,
-        "channel_mention": channel_mention,
-        "product_ref": str(message_id) 
-    }
-
-# === 🤖 AI Enrichment Functions ===
-def load_categories():
-    """Load categories from MongoDB with their representative descriptions."""
-    default_categories = [
-        {"name": "Electronics", "description": "Devices like phones, laptops, and gadgets"},
-        {"name": "Fashion", "description": "Clothing, shoes, and accessories"},
-        {"name": "Home Goods", "description": "Furniture, decor, and household items"},
-        {"name": "Beauty", "description": "Cosmetics, skincare, and makeup products"},
-        {"name": "Sports", "description": "Sporting equipment and gear"},
-        {"name": "Books", "description": "Books, novels, and literature"},
-        {"name": "Groceries", "description": "Food and grocery items"},
-        {"name": "Vehicles", "description": "Cars, bikes, and vehicles"},
-        {"name": "Medicine", "description": "Medicines and health remedies"},
-        {"name": "Perfume", "description": "Fragrances, colognes, and perfumes"}
-    ]
-    stored_categories = categories_collection.find_one({"_id": "categories"})
-    if stored_categories and "categories" in stored_categories:
-        return stored_categories["categories"]
-    else:
-        categories_collection.insert_one({"_id": "categories", "categories": default_categories})
-        return default_categories
-
-def save_categories(categories):
-    """Save updated categories to MongoDB."""
-    categories_collection.update_one(
-        {"_id": "categories"},
-        {"$set": {"categories": categories}},
-        upsert=True
-    )
-
-def get_text_embedding(text):
-    """Generate embedding for a text using sentence-transformers."""
-    global tokenizer, embedder
-    if not AI_MODELS_LOADED:
-        return np.random.rand(1, 384)  # Fallback random embedding
-    
-    # Lazy load from S3
-    if tokenizer is None:
-        tokenizer = load_hf_model_from_s3(MODELS['tokenizer']['s3_prefix'], is_tokenizer=True)
-    if embedder is None:
-        embedder = load_hf_model_from_s3(MODELS['embedder']['s3_prefix'])
-    
-    inputs = tokenizer(text, return_tensors="pt", padding=True, truncation=True, max_length=128)
-    outputs = embedder(**inputs)
-    return outputs.last_hidden_state.mean(dim=1).detach().numpy()
-
-def propose_new_category(text, classification_results, existing_categories):
-    """Propose a general category using semantic similarity and keyword extraction."""
-    if not AI_MODELS_LOADED:
-        return "Miscellaneous"
-    
-    text = clean_text(text).lower()
-    doc = nlp(text)
-    
-    # Use NER to exclude brand names and products
-    entities = {ent.text.lower() for ent in doc.ents if ent.label_ in ["ORG", "PRODUCT"]}
-    
-    # Extract single-word nouns, excluding noise and entities
-    keywords = [
-        token.text for token in doc 
-        if token.pos_ in ["NOUN"] and  # Only nouns, not PROPN
-        len(token.text) > 3 and 
-        token.text.lower() not in entities and 
-        token.text.lower() not in ['item', 'product', 'thing', 'restocked', 'detail', 'catch', 'new', 'sale']
-    ]
-    
-    # Generate embedding for the input text
-    text_embedding = get_text_embedding(text)
-    
-    # Compare with existing category descriptions
-    category_names = [cat["name"] for cat in existing_categories]
-    category_descriptions = [cat["description"] for cat in existing_categories]
-    category_embeddings = [get_text_embedding(desc) for desc in category_descriptions]
-    
-    similarities = cosine_similarity(text_embedding, category_embeddings)[0]
-    max_similarity = max(similarities) if similarities.size > 0 else 0
-    best_category_idx = np.argmax(similarities) if similarities.size > 0 else -1
-    
-    # If similarity is high enough, use the closest existing category
-    if max_similarity > 0.7:  # Adjustable threshold
-        return category_names[best_category_idx]
-    
-    # If keywords exist, use the first one as a new category
-    if keywords:
-        new_category = keywords[0].capitalize()
-        # Avoid overly specific categories by checking against existing ones
-        for cat in existing_categories:
-            if new_category.lower() in cat["description"].lower():
-                return cat["name"]
-        return new_category
-    
-    # Fallback to classifier's top category
-    if classification_results and classification_results["labels"]:
-        return classification_results["labels"][0]
-    
-    return "Miscellaneous"
-
-def enrich_product(title, desc):
-    """AI enrichment function for product categorization and summarization."""
-    global classifier, summarizer, nlp
-    if not AI_MODELS_LOADED:
-        return "Unknown", desc[:80] if desc else title[:80]
-    
-    text = desc if isinstance(desc, str) and len(desc) > 10 else title
-    text = clean_text(text)
-
-    # Lazy load from S3
-    if classifier is None:
-        classifier = load_hf_model_from_s3(MODELS['classifier']['s3_prefix'], is_pipeline=True, pipeline_task=MODELS['classifier']['task'])
-    if summarizer is None:
-        summarizer = load_hf_model_from_s3(MODELS['summarizer']['s3_prefix'], is_pipeline=True, pipeline_task=MODELS['summarizer']['task'])
-    if nlp is None:
-        nlp = load_spacy_model_from_s3(MODELS['nlp']['s3_prefix'])
-
-    # Load current categories
-    categories = load_categories()
-
-    # Category classification
-    try:
-        classification = classifier(text, candidate_labels=[cat["name"] for cat in categories])
-        top_category = classification["labels"][0]
-        top_score = classification["scores"][0]
-
-        # Use semantic similarity for unseen data
-        new_category = propose_new_category(text, classification, categories)
-        if new_category not in [cat["name"] for cat in categories]:
-            # Add new category with a description
-            new_cat_description = text[:100]  # Use first 100 chars as description
-            categories.append({"name": new_category, "description": new_cat_description})
-            save_categories(categories)
-            print(f"📚 Added new category: {new_category}")
-        category = new_category
-    except Exception as e:
-        print(f"⚠️ Classification error: {e}")
-        category = "Unknown"
-
-    # Summarized description
-    try:
-        if len(text) > 50:
-            summary = summarizer(text, max_length=40, min_length=10, do_sample=False)[0]["summary_text"]
-        else:
-            summary = text
-    except Exception as e:
-        print(f"⚠️ Summarization error: {e}")
-        summary = text[:80]
-
-    return category, summary
+def error_handler(update, context):
+    """Handle errors including Conflict errors"""
+    if isinstance(context.error, Conflict):
+        print("❌ Conflict error detected - another bot instance might be running")
+        return
+    print(f'❌ Update "{update}" caused error "{context.error}"')
 # === 🔄 AWS S3 File Management Functions (S3 ONLY) ===
 def file_exists_in_s3(s3_key):
     """Efficiently check if file exists in S3 using head_object (no download)"""
@@ -515,128 +256,50 @@ def ensure_s3_structure():
         print("✅ Created data/ folder in S3")
     except Exception:
         print("✅ data/ folder already exists in S3")
-def model_exists_in_s3(s3_prefix):
-    """Check if a model directory exists in S3 (has at least one file under prefix)."""
-    try:
-        response = s3.list_objects_v2(Bucket=AWS_BUCKET_NAME, Prefix=s3_prefix, MaxKeys=1)
-        return 'Contents' in response
-    except Exception as e:
-        print(f"❌ Error checking model in S3 ({s3_prefix}): {e}")
-        return False
 
-def save_hf_model_to_s3(pretrained_name, s3_prefix, is_pipeline=False, pipeline_task=None):
-    """Save a HF model or pipeline to S3 if not already there."""
-    if model_exists_in_s3(s3_prefix):
-        print(f"✅ Model {pretrained_name} already exists in S3 at {s3_prefix}")
-        return
+# === 🧹 Text cleaning and extraction helpers ===
+def clean_text(text):
+    return ' '.join(text.replace('\xa0', ' ').split())
 
-    print(f"📤 Saving model {pretrained_name} to S3 at {s3_prefix}...")
-    try:
-        if is_pipeline:
-            from transformers import pipeline
-            model = pipeline(pipeline_task, model=pretrained_name)
-        else:
-            from transformers import AutoModel, AutoTokenizer
-            if 'tokenizer' in pretrained_name:
-                model = AutoTokenizer.from_pretrained(pretrained_name)
-            else:
-                model = AutoModel.from_pretrained(pretrained_name)
+def extract_info(text, message_id):
+    text = clean_text(text)
+    
+    title_match = re.split(r'\n|💸|☘️☘️PRICE|Price\s*:|💵', text)[0].strip()
+    title = title_match[:100] if title_match else "No Title"
+    
+    phone_matches = re.findall(r'(\+251\d{8,9}|09\d{8})', text)
+    phone = phone_matches[0] if phone_matches else ""
+    
+    price_match = re.search(
+        r'(Price|💸|☘️☘️PRICE)[:\s]*([\d,]+)|([\d,]+)\s*(ETB|Birr|birr|💵)', 
+        text, 
+        re.IGNORECASE
+    )
+    price = ""
+    if price_match:
+        price = price_match.group(2) or price_match.group(3) or ""
+        price = price.replace(',', '').strip()
+    
+    location_match = re.search(
+        r'(📍|Address|Location|🌺🌺)[:\s]*(.+?)(?=\n|☘️|📞|@|$)', 
+        text, 
+        re.IGNORECASE
+    )
+    location = location_match.group(2).strip() if location_match else ""
+    
+    channel_mention = re.search(r'(@\w+)', text)
+    channel_mention = channel_mention.group(1) if channel_mention else ""
+    
+    return {
+        "title": title,
+        "description": text,
+        "price": price,
+        "phone": phone,
+        "location": location,
+        "channel_mention": channel_mention,
+        "product_ref": str(message_id) 
+    }
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            if is_pipeline:
-                model.save_pretrained(tmpdir)
-            else:
-                model.save_pretrained(tmpdir)
-            
-            for root, _, files in os.walk(tmpdir):
-                for file in files:
-                    local_path = os.path.join(root, file)
-                    rel_path = os.path.relpath(local_path, tmpdir)
-                    s3_key = os.path.join(s3_prefix, rel_path).replace('\\', '/')
-                    s3.upload_file(local_path, AWS_BUCKET_NAME, s3_key)
-        
-        print(f"✅ Saved model {pretrained_name} to S3")
-    except Exception as e:
-        print(f"❌ Error saving model {pretrained_name} to S3: {e}")
-
-def save_spacy_model_to_s3(model_name, s3_prefix):
-    """Save a spaCy model to S3 if not already there."""
-    if model_exists_in_s3(s3_prefix):
-        print(f"✅ spaCy model {model_name} already exists in S3 at {s3_prefix}")
-        return
-
-    print(f"📤 Saving spaCy model {model_name} to S3 at {s3_prefix}...")
-    try:
-        import spacy
-        nlp = spacy.load(model_name)
-        with tempfile.TemporaryDirectory() as tmpdir:
-            nlp.to_disk(tmpdir)
-            
-            for root, _, files in os.walk(tmpdir):
-                for file in files:
-                    local_path = os.path.join(root, file)
-                    rel_path = os.path.relpath(local_path, tmpdir)
-                    s3_key = os.path.join(s3_prefix, rel_path).replace('\\', '/')
-                    s3.upload_file(local_path, AWS_BUCKET_NAME, s3_key)
-        
-        print(f"✅ Saved spaCy model {model_name} to S3")
-    except Exception as e:
-        print(f"❌ Error saving spaCy model {model_name} to S3: {e}")
-
-def load_hf_model_from_s3(s3_prefix, is_pipeline=False, pipeline_task=None, is_tokenizer=False):
-    """Load a HF model or pipeline from S3 using temp dir (auto-cleans)."""
-    print(f"🔄 Loading model from S3 at {s3_prefix}...")
-    try:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            # Download all files under prefix
-            response = s3.list_objects_v2(Bucket=AWS_BUCKET_NAME, Prefix=s3_prefix)
-            if 'Contents' not in response:
-                raise ValueError(f"No files found under {s3_prefix}")
-            
-            for obj in response['Contents']:
-                key = obj['Key']
-                rel_path = os.path.relpath(key, s3_prefix)
-                local_path = os.path.join(tmpdir, rel_path)
-                os.makedirs(os.path.dirname(local_path), exist_ok=True)
-                s3.download_file(AWS_BUCKET_NAME, key, local_path)
-            
-            # Load from temp dir
-            if is_pipeline:
-                from transformers import pipeline
-                return pipeline(pipeline_task, model=tmpdir)
-            elif is_tokenizer:
-                from transformers import AutoTokenizer
-                return AutoTokenizer.from_pretrained(tmpdir)
-            else:
-                from transformers import AutoModel
-                return AutoModel.from_pretrained(tmpdir)
-    except Exception as e:
-        print(f"❌ Error loading model from S3 ({s3_prefix}): {e}")
-        raise
-
-def load_spacy_model_from_s3(s3_prefix):
-    """Load a spaCy model from S3 using temp dir (auto-cleans)."""
-    print(f"🔄 Loading spaCy model from S3 at {s3_prefix}...")
-    try:
-        import spacy
-        with tempfile.TemporaryDirectory() as tmpdir:
-            # Download all files under prefix
-            response = s3.list_objects_v2(Bucket=AWS_BUCKET_NAME, Prefix=s3_prefix)
-            if 'Contents' not in response:
-                raise ValueError(f"No files found under {s3_prefix}")
-            
-            for obj in response['Contents']:
-                key = obj['Key']
-                rel_path = os.path.relpath(key, s3_prefix)
-                local_path = os.path.join(tmpdir, rel_path)
-                os.makedirs(os.path.dirname(local_path), exist_ok=True)
-                s3.download_file(AWS_BUCKET_NAME, key, local_path)
-            
-            # Load from temp dir
-            return spacy.load(tmpdir)
-    except Exception as e:
-        print(f"❌ Error loading spaCy model from S3 ({s3_prefix}): {e}")
-        raise
 # ======================
 # Wrapper for command authorization
 # ======================
@@ -804,191 +467,6 @@ async def get_telethon_client():
                 return None
     
     return None
-
-# ======================
-# 7-day scraping function with AI ENRICHMENT and PURE S3 integration
-# ======================
-async def scrape_channel_7days_async(channel_username: str):
-    """Scrape last 7 days of data from a channel, apply AI enrichment, and store ONLY in S3"""
-    telethon_client = None
-    
-    try:
-        # Use direct S3 access for parquet data
-        print("🔍 Loading parquet data directly from S3...")
-        
-        telethon_client = await get_telethon_client()
-        if not telethon_client:
-            track_session_usage("scraping", False, "Failed to initialize client")
-            return False, "❌ Could not establish connection for scraping."
-        
-        print(f"🔍 Starting 7-day scrape for channel: {channel_username}")
-        
-        try:
-            entity = await telethon_client.get_entity(channel_username)
-            print(f"✅ Channel found: {entity.title}")
-        except (ChannelInvalidError, UsernameInvalidError, UsernameNotOccupiedError) as e:
-            track_session_usage("scraping", False, f"Invalid channel: {str(e)}")
-            return False, f"❌ Channel {channel_username} is invalid or doesn't exist."
-        
-        try:
-            target_entity = await telethon_client.get_entity(FORWARD_CHANNEL)
-            print(f"✅ Target channel resolved: {target_entity.title}")
-        except Exception as e:
-            track_session_usage("scraping", False, f"Target channel error: {str(e)}")
-            return False, f"❌ Could not resolve target channel: {str(e)}"
-        
-        now = datetime.now(timezone.utc)
-        cutoff = now - timedelta(days=7)
-        print(f"⏰ Scraping messages from last 7 days (since {cutoff})")
-        
-        source_messages = []
-        print(f"📡 Collecting messages from source channel: {channel_username}")
-        
-        async for message in telethon_client.iter_messages(entity, limit=None):
-            if not message.text:
-                continue
-            if message.date < cutoff:
-                break
-            source_messages.append({
-                'text': message.text,
-                'date': message.date,
-                'source_channel': channel_username,
-                'source_message_id': message.id
-            })
-        
-        print(f"📋 Collected {len(source_messages)} messages from source channel")
-        
-        scraped_data = []
-        message_count = 0
-        
-        print(f"🔍 Searching for matching messages in target channel...")
-        
-        async for message in telethon_client.iter_messages(target_entity, limit=None):
-            message_count += 1
-            if message_count % 50 == 0:
-                print(f"📊 Processed {message_count} messages in target channel...")
-            if message.date < cutoff:
-                print(f"⏹️ Reached 7-day cutoff at message {message_count}")
-                break
-            if not message.text:
-                continue
-
-            matching_source = None
-            for source_msg in source_messages:
-                if (source_msg['text'] in message.text or 
-                    message.text in source_msg['text'] or
-                    source_msg['text'][:100] in message.text):
-                    matching_source = source_msg
-                    break
-
-            if not matching_source:
-                continue
-
-            info = extract_info(message.text, message.id)
-            
-            # === 🤖 AI ENRICHMENT ===
-            print(f"🤖 Enriching product: {info['title'][:50]}...")
-            predicted_category, generated_description = enrich_product(info["title"], info["description"])
-            
-            if getattr(target_entity, "username", None):
-                post_link = f"https://t.me/{target_entity.username}/{message.id}"
-            else:
-                internal_id = str(target_entity.id)
-                if internal_id.startswith("-100"):
-                    internal_id = internal_id[4:]
-                post_link = f"https://t.me/c/{internal_id}/{message.id}"
-
-            post_data = {
-                "title": info["title"],
-                "description": info["description"],
-                "price": info["price"],
-                "phone": info["phone"],
-                "location": info["location"],
-                "date": message.date.strftime("%Y-%m-%d %H:%M:%S"),
-                "channel": channel_username,
-                "post_link": post_link,
-                "product_ref": str(message.id),
-                "scraped_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                # === 🤖 AI ENRICHMENT FIELDS ===
-                "predicted_category": predicted_category,
-                "generated_description": generated_description
-            }
-            scraped_data.append(post_data)
-        
-        print(f"📋 Found {len(scraped_data)} matching messages in target channel")
-        
-        # Load existing data DIRECTLY FROM S3
-        existing_df = load_parquet_from_s3()
-        if existing_df is None:
-            existing_df = pd.DataFrame()
-        
-        print(f"📁 Loaded existing data with {len(existing_df)} records from S3")
-        
-        new_df = pd.DataFrame(scraped_data)
-        if not new_df.empty:
-            # Combine and deduplicate
-            combined_df = pd.concat([existing_df, new_df], ignore_index=True)
-            combined_df = combined_df.drop_duplicates(subset=['product_ref', 'channel'], keep='last')
-            
-            # Save ONLY to S3
-            success = save_parquet_to_s3(combined_df)
-            if success:
-                print(f"💾 Saved {len(combined_df)} total records to S3")
-                new_count = len(combined_df) - len(existing_df)
-                
-                # === 🤖 AI ENRICHMENT SUMMARY ===
-                if AI_MODELS_LOADED and 'predicted_category' in combined_df.columns:
-                    category_counts = combined_df['predicted_category'].value_counts()
-                    print("\n📈 AI Enrichment Summary:")
-                    for category, count in category_counts.items():
-                        print(f"  {category}: {count} products")
-                
-                track_session_usage("scraping", True, f"Scraped {len(scraped_data)} messages")
-                return True, f"✅ Scraped {len(scraped_data)} messages from {channel_username}. Added {new_count} new records to database."
-            else:
-                track_session_usage("scraping", False, "S3 save failed")
-                return False, f"❌ Failed to save scraped data for {channel_username} to S3."
-        else:
-            track_session_usage("scraping", True, "No new messages found")
-            return False, f"📭 No matching messages found in target channel for {channel_username} in the last 7 days."
-            
-    except Exception as e:
-        error_msg = f"Scraping error: {str(e)}"
-        print(f"❌ {error_msg}")
-        import traceback
-        print(f"🔍 Full traceback: {traceback.format_exc()}")
-        track_session_usage("scraping", False, error_msg)
-        return False, f"❌ Scraping error: {str(e)}"
-    finally:
-        if telethon_client:
-            try:
-                await telethon_client.disconnect()
-                # Upload session file to S3 after operations
-                print("📤 Uploading updated session file to S3...")
-                if os.path.exists(USER_SESSION_FILE):
-                    with open(USER_SESSION_FILE, 'rb') as f:
-                        s3.put_object(
-                            Bucket=AWS_BUCKET_NAME,
-                            Key=f"sessions/{USER_SESSION_FILE}",
-                            Body=f.read()
-                        )
-                    print(f"✅ Session file uploaded to S3: {USER_SESSION_FILE}")
-                    # Clean up temporary file
-                    os.remove(USER_SESSION_FILE)
-            except Exception as e:
-                print(f"⚠️ Error during cleanup: {e}")
-
-def scrape_channel_7days_sync(channel_username: str):
-    """Synchronous wrapper for 7-day scraping with AI enrichment"""
-    try:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        result = loop.run_until_complete(scrape_channel_7days_async(channel_username))
-        loop.close()
-        return result
-    except Exception as e:
-        track_session_usage("scraping", False, f"Sync error: {str(e)}")
-        return False, f"❌ Scraping error: {str(e)}"
 
 # ======================
 # Forward last 7d posts with PURE S3 integration
@@ -1253,38 +731,29 @@ def debug_parquet_comprehensive(update, context):
                 s3_df = load_parquet_from_s3()
                 if not s3_df.empty:
                     msg += f"📊 <b>S3 Data:</b> {len(s3_df)} records\n"
-                    
-                    # Show AI enrichment fields if available
-                    if 'predicted_category' in s3_df.columns:
-                        msg += f"🤖 <b>AI Enrichment:</b> ✅ Active\n"
-                        category_counts = s3_df['predicted_category'].value_counts()
-                        msg += f"📈 <b>Category Distribution:</b>\n"
-                        for category, count in category_counts.head(5).items():
-                            msg += f"• {category}: {count} records\n"
-                    else:
-                        msg += f"🤖 <b>AI Enrichment:</b> ❌ Not available\n"
                 else:
                     msg += "⚠️ S3 file exists but contains no data\n"
             except Exception as e:
                 msg += f"❌ <b>S3 Error:</b> {e}\n"
         
-        # AI Models Status
-        msg += f"\n🤖 <b>AI Models Status:</b> {'✅ Loaded' if AI_MODELS_LOADED else '❌ Not Loaded'}\n"
+        # Data summary if available
+        if not s3_df.empty:
+            msg += f"\n📈 <b>Data Summary:</b>\n"
+            msg += f"• Total Records: {len(s3_df)}\n"
+            msg += f"• Date Range: {s3_df['date'].min() if 'date' in s3_df.columns else 'N/A'} to {s3_df['date'].max() if 'date' in s3_df.columns else 'N/A'}\n"
+            msg += f"• Channels: {s3_df['channel'].nunique() if 'channel' in s3_df.columns else 'N/A'}\n"
+            
+            if 'channel' in s3_df.columns:
+                msg += f"\n🔍 <b>Top Channels:</b>\n"
+                channel_counts = s3_df['channel'].value_counts().head(3)
+                for channel, count in channel_counts.items():
+                    msg += f"• {channel}: {count} records\n"
         
         update.message.reply_text(msg, parse_mode="HTML")
         
     except Exception as e:
         update.message.reply_text(f"❌ Comprehensive debug error: {e}")
-@authorized
-def model_checker(update, context):
-    """Check if AI models exist in S3."""
-    msg = "🔍 <b>AI Models in S3 Status:</b>\n\n"
-    for name, info in MODELS.items():
-        exists = model_exists_in_s3(info['s3_prefix'])
-        status = "✅ Exists" if exists else "❌ Missing (run setup to save)"
-        msg += f"• {name} ({info['pretrained']}): {status}\n"
-    
-    update.message.reply_text(msg, parse_mode="HTML")
+
 @authorized
 def test_s3_write(update, context):
     """Test S3 write functionality with a small sample"""
@@ -1300,9 +769,7 @@ def test_s3_write(update, context):
             "channel": ["@testchannel"],
             "post_link": ["https://t.me/test/1"],
             "product_ref": ["test123"],
-            "scraped_at": [datetime.now().strftime("%Y-%m-%d %H:%M:%S")],
-            "predicted_category": ["Test Category"],
-            "generated_description": ["Test AI-generated description"]
+            "scraped_at": [datetime.now().strftime("%Y-%m-%d %H:%M:%S")]
         }
         
         test_df = pd.DataFrame(test_data)
@@ -1372,8 +839,7 @@ def check_session_usage(update, context):
         msg += f"🔧 <b>Current Session:</b> {stats['current_session']}\n"
         msg += f"🌍 <b>Environment:</b> {stats['current_environment']}\n"
         msg += f"💻 <b>Computer:</b> {platform.node()}\n"
-        msg += f"☁️ <b>S3 Bucket:</b> {AWS_BUCKET_NAME}\n"
-        msg += f"🤖 <b>AI Models:</b> {'✅ Loaded' if AI_MODELS_LOADED else '❌ Not Loaded'}\n\n"
+        msg += f"☁️ <b>S3 Bucket:</b> {AWS_BUCKET_NAME}\n\n"
         
         msg += f"📈 <b>Operations Summary:</b>\n"
         msg += f"• Total Operations: {stats['total_operations']}\n"
@@ -1411,6 +877,176 @@ def check_session_usage(update, context):
         update.message.reply_text(f"❌ Error checking session usage: {e}")
 
 # ======================
+# 7-day scraping function with PURE S3 integration
+# ======================
+async def scrape_channel_7days_async(channel_username: str):
+    """Scrape last 7 days of data from a channel and store ONLY in S3"""
+    telethon_client = None
+    
+    try:
+        # Use direct S3 access for parquet data
+        print("🔍 Loading parquet data directly from S3...")
+        
+        telethon_client = await get_telethon_client()
+        if not telethon_client:
+            track_session_usage("scraping", False, "Failed to initialize client")
+            return False, "❌ Could not establish connection for scraping."
+        
+        print(f"🔍 Starting 7-day scrape for channel: {channel_username}")
+        
+        try:
+            entity = await telethon_client.get_entity(channel_username)
+            print(f"✅ Channel found: {entity.title}")
+        except (ChannelInvalidError, UsernameInvalidError, UsernameNotOccupiedError) as e:
+            track_session_usage("scraping", False, f"Invalid channel: {str(e)}")
+            return False, f"❌ Channel {channel_username} is invalid or doesn't exist."
+        
+        try:
+            target_entity = await telethon_client.get_entity(FORWARD_CHANNEL)
+            print(f"✅ Target channel resolved: {target_entity.title}")
+        except Exception as e:
+            track_session_usage("scraping", False, f"Target channel error: {str(e)}")
+            return False, f"❌ Could not resolve target channel: {str(e)}"
+        
+        now = datetime.now(timezone.utc)
+        cutoff = now - timedelta(days=7)
+        print(f"⏰ Scraping messages from last 7 days (since {cutoff})")
+        
+        source_messages = []
+        print(f"📡 Collecting messages from source channel: {channel_username}")
+        
+        async for message in telethon_client.iter_messages(entity, limit=None):
+            if not message.text:
+                continue
+            if message.date < cutoff:
+                break
+            source_messages.append({
+                'text': message.text,
+                'date': message.date,
+                'source_channel': channel_username,
+                'source_message_id': message.id
+            })
+        
+        print(f"📋 Collected {len(source_messages)} messages from source channel")
+        
+        scraped_data = []
+        message_count = 0
+        
+        print(f"🔍 Searching for matching messages in target channel...")
+        
+        async for message in telethon_client.iter_messages(target_entity, limit=None):
+            message_count += 1
+            if message_count % 50 == 0:
+                print(f"📊 Processed {message_count} messages in target channel...")
+            if message.date < cutoff:
+                print(f"⏹️ Reached 7-day cutoff at message {message_count}")
+                break
+            if not message.text:
+                continue
+
+            matching_source = None
+            for source_msg in source_messages:
+                if (source_msg['text'] in message.text or 
+                    message.text in source_msg['text'] or
+                    source_msg['text'][:100] in message.text):
+                    matching_source = source_msg
+                    break
+
+            if not matching_source:
+                continue
+
+            info = extract_info(message.text, message.id)
+            
+            if getattr(target_entity, "username", None):
+                post_link = f"https://t.me/{target_entity.username}/{message.id}"
+            else:
+                internal_id = str(target_entity.id)
+                if internal_id.startswith("-100"):
+                    internal_id = internal_id[4:]
+                post_link = f"https://t.me/c/{internal_id}/{message.id}"
+
+            post_data = {
+                "title": info["title"],
+                "description": info["description"],
+                "price": info["price"],
+                "phone": info["phone"],
+                "location": info["location"],
+                "date": message.date.strftime("%Y-%m-%d %H:%M:%S"),
+                "channel": channel_username,
+                "post_link": post_link,
+                "product_ref": str(message.id),
+                "scraped_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            }
+            scraped_data.append(post_data)
+        
+        print(f"📋 Found {len(scraped_data)} matching messages in target channel")
+        
+        # Load existing data DIRECTLY FROM S3
+        existing_df = load_parquet_from_s3()
+        if existing_df is None:
+            existing_df = pd.DataFrame()
+        
+        print(f"📁 Loaded existing data with {len(existing_df)} records from S3")
+        
+        new_df = pd.DataFrame(scraped_data)
+        if not new_df.empty:
+            # Combine and deduplicate
+            combined_df = pd.concat([existing_df, new_df], ignore_index=True)
+            combined_df = combined_df.drop_duplicates(subset=['product_ref', 'channel'], keep='last')
+            
+            # Save ONLY to S3
+            success = save_parquet_to_s3(combined_df)
+            if success:
+                print(f"💾 Saved {len(combined_df)} total records to S3")
+                new_count = len(combined_df) - len(existing_df)
+                track_session_usage("scraping", True, f"Scraped {len(scraped_data)} messages")
+                return True, f"✅ Scraped {len(scraped_data)} messages from {channel_username}. Added {new_count} new records to database."
+            else:
+                track_session_usage("scraping", False, "S3 save failed")
+                return False, f"❌ Failed to save scraped data for {channel_username} to S3."
+        else:
+            track_session_usage("scraping", True, "No new messages found")
+            return False, f"📭 No matching messages found in target channel for {channel_username} in the last 7 days."
+            
+    except Exception as e:
+        error_msg = f"Scraping error: {str(e)}"
+        print(f"❌ {error_msg}")
+        import traceback
+        print(f"🔍 Full traceback: {traceback.format_exc()}")
+        track_session_usage("scraping", False, error_msg)
+        return False, f"❌ Scraping error: {str(e)}"
+    finally:
+        if telethon_client:
+            try:
+                await telethon_client.disconnect()
+                # Upload session file to S3 after operations
+                print("📤 Uploading updated session file to S3...")
+                if os.path.exists(USER_SESSION_FILE):
+                    with open(USER_SESSION_FILE, 'rb') as f:
+                        s3.put_object(
+                            Bucket=AWS_BUCKET_NAME,
+                            Key=f"sessions/{USER_SESSION_FILE}",
+                            Body=f.read()
+                        )
+                    print(f"✅ Session file uploaded to S3: {USER_SESSION_FILE}")
+                    # Clean up temporary file
+                    os.remove(USER_SESSION_FILE)
+            except Exception as e:
+                print(f"⚠️ Error during cleanup: {e}")
+
+def scrape_channel_7days_sync(channel_username: str):
+    """Synchronous wrapper for 7-day scraping"""
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        result = loop.run_until_complete(scrape_channel_7days_async(channel_username))
+        loop.close()
+        return result
+    except Exception as e:
+        track_session_usage("scraping", False, f"Sync error: {str(e)}")
+        return False, f"❌ Scraping error: {str(e)}"
+
+# ======================
 # Bot commands (remain the same but now use pure S3 functions)
 # ======================
 @authorized
@@ -1438,19 +1074,21 @@ def add_channel(update, context):
             parse_mode="HTML",
         )
 
-        # Run operations sequentially
+        # Run operations in CORRECT ORDER
         def run_operations():
             try:
-                # First scraping with AI enrichment
-                update.message.reply_text(f"⏳ Starting 7-day data scraping from {username} with AI enrichment...")
-                success, result_msg = scrape_channel_7days_sync(username)
-                context.bot.send_message(update.effective_chat.id, text=result_msg, parse_mode="HTML")
-                
-                # Then forwarding with delay
-                import time
-                time.sleep(2)
+                # FIRST: Forward messages to target channel
                 update.message.reply_text(f"⏳ Forwarding last 7d posts from {username}...")
                 success, result_msg = forward_last_7d_sync(username)
+                context.bot.send_message(update.effective_chat.id, text=result_msg, parse_mode="HTML")
+                
+                # Add delay to ensure forwarding completes
+                import time
+                time.sleep(3)
+                
+                # THEN: Scrape from target channel (now messages exist there)
+                update.message.reply_text(f"⏳ Starting 7-day data scraping from {username}...")
+                success, result_msg = scrape_channel_7days_sync(username)
                 context.bot.send_message(update.effective_chat.id, text=result_msg, parse_mode="HTML")
                 
             except Exception as e:
@@ -1463,7 +1101,6 @@ def add_channel(update, context):
         update.message.reply_text(f"❌ Could not add channel: {str(e)}")
     except Exception as e:
         update.message.reply_text(f"❌ Unexpected error: {str(e)}")
-
 @authorized
 def debug_s3_parquet(update, context):
     """Enhanced debug command to check S3 parquet file status"""
@@ -1474,8 +1111,7 @@ def debug_s3_parquet(update, context):
         exists = file_exists_in_s3(s3_key)
         msg = f"🔍 <b>S3 Parquet Debug Information</b>\n\n"
         msg += f"📁 <b>S3 Path:</b> {s3_key}\n"
-        msg += f"✅ <b>File Exists:</b> {'Yes' if exists else 'No'}\n"
-        msg += f"🤖 <b>AI Models:</b> {'✅ Loaded' if AI_MODELS_LOADED else '❌ Not Loaded'}\n\n"
+        msg += f"✅ <b>File Exists:</b> {'Yes' if exists else 'No'}\n\n"
         
         if exists:
             # Get file info
@@ -1496,14 +1132,6 @@ def debug_s3_parquet(update, context):
                     msg += f"• Total Records: {len(df)}\n"
                     msg += f"• Date Range: {df['date'].min()} to {df['date'].max()}\n"
                     msg += f"• Channels: {df['channel'].nunique()}\n\n"
-                    
-                    # Show AI enrichment info if available
-                    if 'predicted_category' in df.columns:
-                        msg += f"🤖 <b>AI Enrichment:</b>\n"
-                        category_counts = df['predicted_category'].value_counts()
-                        for category, count in category_counts.head(3).items():
-                            msg += f"• {category}: {count} records\n"
-                        msg += f"\n"
                     
                     msg += f"🔍 <b>Channel Distribution:</b>\n"
                     channel_counts = df['channel'].value_counts()
@@ -1531,15 +1159,6 @@ def check_scraped_data(update, context):
             
             msg = f"📊 <b>Scraped Data Summary (from S3):</b>\n"
             msg += f"Total records: {len(df)}\n\n"
-            
-            # Show AI enrichment summary if available
-            if 'predicted_category' in df.columns:
-                category_counts = df['predicted_category'].value_counts()
-                msg += "<b>AI Category Distribution:</b>\n"
-                for category, count in category_counts.head(5).items():
-                    msg += f"• {category}: {count} records\n"
-                msg += f"\n"
-            
             msg += "<b>Records per channel:</b>\n"
             
             for channel, count in channel_counts.items():
@@ -1623,8 +1242,7 @@ def check_s3_status(update, context):
         
         msg = f"☁️ <b>S3 Status Report (Efficient Check)</b>\n\n"
         msg += f"<b>Bucket Connection:</b> {bucket_status}\n"
-        msg += f"<b>Bucket Name:</b> {AWS_BUCKET_NAME}\n"
-        msg += f"<b>AI Models:</b> {'✅ Loaded' if AI_MODELS_LOADED else '❌ Not Loaded'}\n\n"
+        msg += f"<b>Bucket Name:</b> {AWS_BUCKET_NAME}\n\n"
         
         msg += f"<b>File Status (using head_object):</b>\n"
         for file_type, exists in files_status.items():
@@ -1685,8 +1303,7 @@ def test_connection(update, context):
                         return f"{s3_status}\n❌ Could not establish Telethon connection."
                     
                     me = await client.get_me()
-                    result = f"{s3_status}\n✅ Telethon connected as: {me.first_name} (@{me.username})\n"
-                    result += f"🤖 AI Models: {'✅ Loaded' if AI_MODELS_LOADED else '❌ Not Loaded'}\n\n"
+                    result = f"{s3_status}\n✅ Telethon connected as: {me.first_name} (@{me.username})\n\n"
                     
                     try:
                         target = await client.get_entity(FORWARD_CHANNEL)
@@ -1750,8 +1367,7 @@ def diagnose_session(update, context):
         
         msg = f"🔍 <b>Session Diagnosis (S3 ONLY)</b>\n\n"
         msg += f"📁 <b>Session File:</b> {USER_SESSION_FILE}\n"
-        msg += f"☁️ <b>S3 Exists:</b> {'✅' if s3_exists else '❌'}\n"
-        msg += f"🤖 <b>AI Models:</b> {'✅ Loaded' if AI_MODELS_LOADED else '❌ Not Loaded'}\n\n"
+        msg += f"☁️ <b>S3 Exists:</b> {'✅' if s3_exists else '❌'}\n\n"
         
         if not s3_exists:
             msg += "❌ <b>Problem:</b> No session file exists in S3!\n"
@@ -1814,11 +1430,24 @@ def code(update, context):
 # Main (S3 ONLY)
 # ======================
 def main():
+    # Start Flask thread
+    threading.Thread(target=run_flask, daemon=True).start()
+    
     from telegram.utils.request import Request
+    from telegram.error import Conflict
+    
+    # ✅ FIX: Create Bot with Request instead of passing to Updater
     request = Request(connect_timeout=30, read_timeout=30, con_pool_size=8)
-    updater = Updater(BOT_TOKEN, use_context=True)
+    bot = Bot(token=BOT_TOKEN, request=request)
+    
+    # ✅ FIX: Pass bot to Updater instead of token
+    updater = Updater(bot=bot, use_context=True)
     dp = updater.dispatcher
-    request=request
+    
+    # Add error handler
+    dp.add_error_handler(error_handler)
+   
+    # All your existing handlers
     dp.add_handler(CommandHandler("start", start))
     dp.add_handler(CommandHandler("code", code))
     dp.add_handler(CommandHandler("addchannel", add_channel))
@@ -1837,13 +1466,12 @@ def main():
     dp.add_handler(CommandHandler("diagnose", diagnose_session))
     dp.add_handler(CommandHandler("debug_parquet", debug_s3_parquet))
     dp.add_handler(CommandHandler("test_s3_write", test_s3_write))
-    dp.add_handler(CommandHandler("modelchecker", model_checker))
     dp.add_handler(CommandHandler("debug_parquet_comprehensive", debug_parquet_comprehensive))
+    
     print(f"🤖 Bot is running...")
     print(f"🔧 Using session file: {USER_SESSION_FILE}")
     print(f"🌍 Environment: {'render' if 'RENDER' in os.environ else 'local'}")
     print(f"☁️ S3 Bucket: {AWS_BUCKET_NAME}")
-    print(f"🤖 AI Models: {'✅ Loaded' if AI_MODELS_LOADED else '❌ Not Loaded'}")
     
     # Efficiently check all S3 files on startup
     print("\n🔍 Checking S3 files efficiently (using head_object)...")
@@ -1853,14 +1481,22 @@ def main():
     ensure_s3_structure()
     
     try:
-        updater.start_polling()
+        # ✅ FIX: Use improved start_polling with parameters
+        updater.start_polling(
+            timeout=10,
+            drop_pending_updates=True,
+            allowed_updates=['message', 'callback_query']
+        )
+        print("✅ Bot started successfully!")
         updater.idle()
+    except Conflict as e:
+        print(f"❌ Bot conflict error: {e}")
+        print("💡 Another bot instance might be running. Wait a few minutes and try again.")
     except KeyboardInterrupt:
         print("\n🛑 Shutting down bot...")
     except Exception as e:
         print(f"❌ Bot error: {e}")
     finally:
         print("👋 Bot stopped")
-
 if __name__ == "__main__":
     main()
