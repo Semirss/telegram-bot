@@ -1088,7 +1088,7 @@ def check_session_usage(update, context):
 # 7-day scraping function with PURE S3 integration
 # ======================
 async def scrape_channel_7days_async(channel_username: str):
-    """Scrape last 7 days of data from a channel with AI enrichment"""
+    """Scrape last 7 days of data directly from source channel with AI enrichment - FIXED VERSION"""
     telethon_client = None
     
     try:
@@ -1103,37 +1103,55 @@ async def scrape_channel_7days_async(channel_username: str):
         
         try:
             entity = await telethon_client.get_entity(channel_username)
-            print(f"✅ Channel found: {entity.title}")
+            print(f"✅ Source channel found: {entity.title}")
         except (ChannelInvalidError, UsernameInvalidError, UsernameNotOccupiedError) as e:
             track_session_usage("scraping", False, f"Invalid channel: {str(e)}")
             return False, f"❌ Channel {channel_username} is invalid or doesn't exist."
-        
+
         now = datetime.now(timezone.utc)
         cutoff = now - timedelta(days=7)
-        print(f"⏰ Scraping messages from last 7 days (since {cutoff})")
-        
+        print(f"⏰ Scraping ALL messages from last 7 days (since {cutoff})")
+
         scraped_data = []
         message_count = 0
+        total_messages_found = 0
         
-        print(f"📡 Collecting messages directly from source channel: {channel_username}")
+        print(f"📡 Collecting ALL messages from source channel: {channel_username}")
         
-        # DIRECT APPROACH: Scrape from source channel instead of target channel
-        async for message in telethon_client.iter_messages(entity, limit=200):
+        # FIX: Remove the limit=200 and use the SAME logic as forwarding
+        async for message in telethon_client.iter_messages(entity, limit=None):  # REMOVED limit=200
             message_count += 1
-            if message_count % 10 == 0:
-                print(f"📊 Processed {message_count} messages...")
+            if message_count % 20 == 0:  # Less frequent logging
+                print(f"📊 Scanned {message_count} messages... Found {total_messages_found} valid messages")
                 
+            # FIX: Use the SAME cutoff logic as forwarding
             if message.date < cutoff:
-                print(f"⏹️ Reached 7-day cutoff at message {message_count}")
+                print(f"⏹️ Reached 7-day cutoff. Scanned {message_count} total messages, found {total_messages_found} valid messages in last 7 days")
                 break
                 
-            if not message.text:
-                continue
+            # FIX: Include BOTH text and media messages (same as forwarding)
+            if not message.text and not message.media:
+                continue  # Skip messages with no content
 
-            info = extract_info(message.text, message.id)
+            total_messages_found += 1
             
+            # Extract info from message text, or create basic info for media messages
+            if message.text:
+                info = extract_info(message.text, message.id)
+            else:
+                # For media-only messages, create basic info
+                info = {
+                    "title": "Media Post",
+                    "description": f"Media message from {channel_username}",
+                    "price": "",
+                    "phone": "",
+                    "location": "",
+                    "channel_mention": channel_username,
+                    "product_ref": str(message.id)
+                }
+
             # AI ENHANCEMENT
-            print(f"🤖 AI enriching product: {info['title'][:50]}...")
+            print(f"🤖 AI enriching message {message.id}: {info['title'][:50]}...")
             predicted_category, generated_description = enrich_product_with_ai(info["title"], info["description"])
             
             if getattr(entity, "username", None):
@@ -1157,13 +1175,15 @@ async def scrape_channel_7days_async(channel_username: str):
                 "scraped_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "predicted_category": predicted_category,
                 "generated_description": generated_description,
-                "ai_enhanced": True
+                "ai_enhanced": True,
+                "has_media": bool(message.media),
+                "has_text": bool(message.text)
             }
             scraped_data.append(post_data)
         
-        print(f"📋 Found {len(scraped_data)} messages with AI enhancement")
+        print(f"📋 Found {len(scraped_data)} total messages with AI enhancement from {channel_username}")
+        print(f"📊 Statistics: Scanned {message_count} messages, {total_messages_found} in last 7 days")
         
-        # Rest of your existing code for saving to S3...
         # Load existing data DIRECTLY FROM S3
         existing_df = load_parquet_from_s3()
         if existing_df is None:
