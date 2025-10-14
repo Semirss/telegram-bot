@@ -1125,7 +1125,6 @@ def check_session_usage(update, context):
         
     except Exception as e:
         update.message.reply_text(f"❌ Error checking session usage: {e}")
-
 # ======================
 # 7-day scraping function with PURE S3 integration
 # ======================
@@ -1160,36 +1159,6 @@ async def scrape_channel_7days_async(channel_username: str):
         cutoff = now - timedelta(days=7)
         print(f"⏰ Scraping ALL messages from last 7 days (since {cutoff})")
 
-        # Load forwarded messages data to map source→target messages
-        forwarded_data = load_json_from_s3(f"data/{FORWARDED_FILE}")
-        forwarded_ids = {
-            int(msg_id): datetime.strptime(ts, "%Y-%m-%d %H:%M:%S") 
-            for msg_id, ts in forwarded_data.items()
-        } if forwarded_data else {}
-
-        # Build mapping of source message IDs to target message IDs by scanning target channel
-        source_to_target_map = {}
-        print(f"🔍 Building message mapping from target channel {FORWARD_CHANNEL}...")
-        
-        target_message_count = 0
-        async for target_message in telethon_client.iter_messages(target_entity, limit=500):  # Limit to recent 500 messages
-            target_message_count += 1
-            if target_message_count % 50 == 0:
-                print(f"📊 Scanned {target_message_count} target messages...")
-                
-            if target_message.forward:
-                # This is a forwarded message, get the original source message ID
-                if (hasattr(target_message.forward, 'original_fwd') and 
-                    target_message.forward.original_fwd and 
-                    hasattr(target_message.forward.original_fwd, 'channel_id') and
-                    str(target_message.forward.original_fwd.channel_id) == str(source_entity.id)):
-                    
-                    source_msg_id = target_message.forward.original_fwd.id
-                    source_to_target_map[source_msg_id] = target_message.id
-                    print(f"🔗 Mapped source:{source_msg_id} → target:{target_message.id}")
-        
-        print(f"✅ Built mapping for {len(source_to_target_map)} forwarded messages")
-
         scraped_data = []
         message_count = 0
         total_messages_found = 0
@@ -1218,33 +1187,17 @@ async def scrape_channel_7days_async(channel_username: str):
             # AI ENHANCEMENT using the EXACT same function as first code
             print(f"🤖 AI enriching message {message.id}: {info['title'][:50]}...")
             predicted_category, generated_description = enrich_product_with_ai(info["title"], info["description"])            
-            # 🔥 KEY CHANGE: Use TARGET channel for post_link and product_ref
-            target_message_id = source_to_target_map.get(message.id)
             
-            if target_message_id:
-                # This message was forwarded, use target channel info
-                if getattr(target_entity, "username", None):
-                    post_link = f"https://t.me/{target_entity.username}/{target_message_id}"
-                else:
-                    internal_id = str(target_entity.id)
-                    if internal_id.startswith("-100"):
-                        internal_id = internal_id[4:]
-                    post_link = f"https://t.me/c/{internal_id}/{target_message_id}"
-                
-                product_ref = str(target_message_id)
-                print(f"✅ Using forwarded message: source:{message.id} → target:{target_message_id}")
+            # 🔥 EXACT LOGIC FROM SECOND FUNCTION for post_link and product_ref
+            if getattr(target_entity, "username", None):
+                post_link = f"https://t.me/{target_entity.username}/{message.id}"
             else:
-                # Message wasn't forwarded (shouldn't happen if forwarding worked), fallback to source
-                if getattr(source_entity, "username", None):
-                    post_link = f"https://t.me/{target_entity.username}/{target_message.id}"
-                else:
-                    internal_id = str(source_entity.id)
-                    if internal_id.startswith("-100"):
-                        internal_id = internal_id[4:]
-                    post_link = f"https://t.me/c/{internal_id}/{target_message.id}"
-                
-                product_ref = str(target_message_id)
-                print(f"⚠️ Using source message (not forwarded): {message.id}")
+                internal_id = str(target_entity.id)
+                if internal_id.startswith("-100"):
+                    internal_id = internal_id[4:]
+                post_link = f"https://t.me/c/{internal_id}/{message.id}"
+
+            product_ref = str(message.id)
 
             # Create data structure matching the first code's format but with target channel links
             post_data = {
@@ -1264,13 +1217,12 @@ async def scrape_channel_7days_async(channel_username: str):
                 "has_media": bool(message.media),
                 "has_text": bool(message.text),
                 "source_message_id": message.id,  # Keep track of source for debugging
-                "target_message_id": target_message_id if target_message_id else None
+                "target_message_id": message.id   # Same as product_ref for consistency
             }
             scraped_data.append(post_data)
         
         print(f"📋 Found {len(scraped_data)} total messages with AI enhancement from {channel_username}")
         print(f"📊 Statistics: Scanned {message_count} total messages, {total_messages_found} with text in last 7 days")
-        print(f"🔗 Forwarded messages mapped: {len([d for d in scraped_data if d['target_message_id'] is not None])}")
         
         # Load existing data DIRECTLY FROM S3
         existing_df = load_parquet_from_s3()
@@ -1296,17 +1248,12 @@ async def scrape_channel_7days_async(channel_username: str):
                 for category, count in category_counts.head(5).items():
                     print(f"  • {category}: {count} products")
                 
-                # Print forwarding stats
-                forwarded_count = len([d for d in scraped_data if d['target_message_id'] is not None])
-                not_forwarded_count = len(scraped_data) - forwarded_count
-                print(f"📤 Forwarding Stats: {forwarded_count} forwarded, {not_forwarded_count} not forwarded")
-                
                 new_count = len(combined_df) - len(existing_df)
                 track_session_usage("scraping", True, f"Scraped {len(scraped_data)} messages with AI")
                 
                 result_msg = f"✅ Scraped {len(scraped_data)} messages from {channel_username}. "
                 result_msg += f"Added {new_count} new AI-enhanced records to database. "
-                result_msg += f"({forwarded_count} linked to {FORWARD_CHANNEL})"
+                result_msg += f"(All linked to {FORWARD_CHANNEL})"
                 
                 return True, result_msg
             else:
@@ -1353,7 +1300,7 @@ def scrape_channel_7days_sync(channel_username: str):
     except Exception as e:
         track_session_usage("scraping", False, f"Sync error: {str(e)}")
         return False, f"❌ Scraping error: {str(e)}"
-
+    
 # ======================
 # Bot commands (remain the same but now use pure S3 functions)
 # ======================
