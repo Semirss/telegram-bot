@@ -1221,30 +1221,16 @@ async def scrape_channel_7days_async(channel_username: str):
             # 🔥 KEY CHANGE: Use TARGET channel for post_link and product_ref
             target_message_id = source_to_target_map.get(message.id)
             
-            if target_message_id:
-                # This message was forwarded, use target channel info
-                if getattr(target_entity, "username", None):
-                    post_link = f"https://t.me/{target_entity.username}/{target_message_id}"
-                else:
-                    internal_id = str(target_entity.id)
-                    if internal_id.startswith("-100"):
-                        internal_id = internal_id[4:]
-                    post_link = f"https://t.me/c/{internal_id}/{target_message_id}"
-                
-                product_ref = str(target_message_id)
-                print(f"✅ Using forwarded message: source:{message.id} → target:{target_message_id}")
+            if getattr(target_entity, "username", None):
+                post_link = f"https://t.me/{target_entity.username}/{message.id}"
             else:
-                # Message wasn't forwarded (shouldn't happen if forwarding worked), fallback to source
-                if getattr(source_entity, "username", None):
-                    post_link = f"https://t.me/{source_entity.username}/{message.id}"
-                else:
-                    internal_id = str(source_entity.id)
-                    if internal_id.startswith("-100"):
-                        internal_id = internal_id[4:]
-                    post_link = f"https://t.me/c/{internal_id}/{message.id}"
-                
-                product_ref = str(message.id)
-                print(f"⚠️ Using source message (not forwarded): {message.id}")
+                internal_id = str(target_entity.id)
+            if internal_id.startswith("-100"):
+                internal_id = internal_id[4:]
+                post_link = f"https://t.me/c/{internal_id}/{message.id}"
+
+            product_ref = str(message.id)
+            print(f"⚠️ Using source message (not forwarded): {message.id}")
 
             # Create data structure matching the first code's format but with target channel links
             post_data = {
