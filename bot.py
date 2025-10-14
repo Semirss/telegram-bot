@@ -1243,7 +1243,7 @@ async def scrape_channel_7days_async(channel_username: str):
                         internal_id = internal_id[4:]
                     post_link = f"https://t.me/c/{internal_id}/{target_message.id}"
                 
-                product_ref = str(message.id)
+                product_ref = str(target_message_id)
                 print(f"⚠️ Using source message (not forwarded): {message.id}")
 
             # Create data structure matching the first code's format but with target channel links
