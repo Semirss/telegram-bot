@@ -23,7 +23,7 @@ import tempfile
 import requests
 import time
 from telegram import Bot
-from telegram.error import BadRequest, Conflict  # Add Conflict to imports
+from telegram.error import BadRequest, Conflict  
 app = Flask(__name__)
 
 @app.route("/")
@@ -48,6 +48,8 @@ ADMIN_CODE = os.getenv("ADMIN_CODE")
 AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID")
 AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
 AWS_BUCKET_NAME = os.getenv("AWS_BUCKET_NAME", "your-telegram-bot-bucket")
+
+
 
 # Initialize S3 client
 s3 = boto3.client(
@@ -1502,7 +1504,10 @@ def unknown_command(update, context):
         "/check_s3 - Check S3 status\n"
         "/cleanup - Cleanup sessions\n"
         "/clearhistory - Clear forwarded history"
-        "/debug_parquet - Debug parquet file in S3"
+        "/diagnose - Diagnose session health\n"
+        "/debug_parquet - Debug a Parquet file in S3\n"
+        "/test_s3_write - Test S3 write access\n"
+        "/debug_parquet_comprehensive - Comprehensive Parquet debug"
     )
 
 @authorized
@@ -1620,8 +1625,11 @@ def start(update, context):
             "/check_data - Check scraped data\n"
             "/check_s3 - Check S3 status\n"
             "/cleanup - Cleanup sessions\n"
-            "/clearhistory - Clear forwarded history"
-            "/debug_parquet - debug_parquet that is in the s3 bucket"
+            "/clearhistory - Clear forwarded history\n"
+            "/diagnose - Diagnose session health\n"
+            "/debug_parquet - Debug a Parquet file in S3\n"
+            "/test_s3_write - Test S3 write access\n"
+            "/debug_parquet_comprehensive - Comprehensive Parquet debug"
         )
     else:
         update.message.reply_text(
@@ -1684,12 +1692,12 @@ def main():
     dp.add_handler(CommandHandler("check_s3", check_s3_status))
     dp.add_handler(CommandHandler("cleanup", cleanup_sessions))
     dp.add_handler(CommandHandler("clearhistory", clear_forwarded_history))
-    dp.add_handler(MessageHandler(Filters.command, unknown_command))
     dp.add_handler(CommandHandler("diagnose", diagnose_session))
     dp.add_handler(CommandHandler("debug_parquet", debug_s3_parquet))
     dp.add_handler(CommandHandler("test_s3_write", test_s3_write))
     dp.add_handler(CommandHandler("debug_parquet_comprehensive", debug_parquet_comprehensive))
-    
+    dp.add_handler(MessageHandler(Filters.command, unknown_command))
+
     print(f"🤖 Bot is running...")
     print(f"🔧 Using session file: {USER_SESSION_FILE}")
     print(f"🌍 Environment: {'render' if 'RENDER' in os.environ else 'local'}")
