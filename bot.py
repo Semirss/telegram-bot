@@ -787,7 +787,7 @@ async def forward_last_7d_async(channel_username: str):
         print(f"📨 Fetching messages from {channel_username}...")
         
         try:
-            async for message in telethon_client.iter_messages(entity, limit=500):
+            async for message in telethon_client.iter_messages(entity, limit=200):
                 message_count += 1
                 if message_count % 10 == 0:
                     print(f"📊 Processed {message_count} messages...")
@@ -1159,54 +1159,93 @@ async def scrape_channel_7days_async(channel_username: str):
         cutoff = now - timedelta(days=7)
         print(f"⏰ Scraping ALL messages from last 7 days (since {cutoff})")
 
-        scraped_data = []
+        # First, collect source messages
+        source_messages = []
         message_count = 0
-        total_messages_found = 0
         
         print(f"📡 Collecting messages from source channel: {channel_username}")
         
-        # Use the EXACT same logic as first code: iterate through source channel messages
         async for message in telethon_client.iter_messages(source_entity, limit=None):
             message_count += 1
             if message_count % 20 == 0:
-                print(f"📊 Scanned {message_count} source messages... Found {total_messages_found} valid messages")
+                print(f"📊 Scanned {message_count} source messages... Found {len(source_messages)} valid messages")
                 
             if message.date < cutoff:
-                print(f"⏹️ Reached 7-day cutoff. Scanned {message_count} total messages, found {total_messages_found} valid messages in last 7 days")
+                print(f"⏹️ Reached 7-day cutoff. Scanned {message_count} total messages, found {len(source_messages)} valid messages in last 7 days")
                 break
                 
-            # Skip messages without text (same as first code)
+            # Skip messages without text
             if not message.text:
                 continue
 
-            total_messages_found += 1
+            source_messages.append({
+                'text': message.text,
+                'date': message.date,
+                'source_channel': channel_username,
+                'source_message_id': message.id
+            })
+
+        # Now scan TARGET channel to find matching forwarded messages
+        scraped_data = []
+        target_message_count = 0
+        seen_posts = set()
+        
+        print(f"🔍 Searching for matching messages in target channel {FORWARD_CHANNEL}...")
+        
+        async for target_message in telethon_client.iter_messages(target_entity, limit=None):
+            target_message_count += 1
+            if target_message_count % 20 == 0:
+                print(f"📊 Scanned {target_message_count} target messages... Found {len(scraped_data)} matches")
+                
+            if target_message.date < cutoff:
+                print(f"⏹️ Reached 7-day cutoff in target channel. Scanned {target_message_count} total messages")
+                break
+                
+            if not target_message.text:
+                continue
+                
+            if target_message.id in seen_posts:
+                continue
+            seen_posts.add(target_message.id)
+
+            # Find matching source message by text content
+            matching_source = None
+            for source_msg in source_messages:
+                if (source_msg['text'] in target_message.text or 
+                    target_message.text in source_msg['text'] or
+                    source_msg['text'][:100] in target_message.text):
+                    matching_source = source_msg
+                    break
+
+            if not matching_source:
+                continue
+
+            # Extract info from TARGET message text
+            info = extract_info(target_message.text, target_message.id)
             
-            # Extract info from message text using the EXACT same function as first code
-            info = extract_info(message.text, message.id)
-            
-            # AI ENHANCEMENT using the EXACT same function as first code
-            print(f"🤖 AI enriching message {message.id}: {info['title'][:50]}...")
+            # AI ENHANCEMENT
+            print(f"🤖 AI enriching message {target_message.id}: {info['title'][:50]}...")
             predicted_category, generated_description = enrich_product_with_ai(info["title"], info["description"])            
             
-            # 🔥 EXACT LOGIC FROM SECOND FUNCTION for post_link and product_ref
+            # 🔥 CORRECTED: Use TARGET channel entity and TARGET message ID for post_link
             if getattr(target_entity, "username", None):
-                post_link = f"https://t.me/{target_entity.username}/{message.id}"
+                post_link = f"https://t.me/{target_entity.username}/{target_message.id}"
             else:
                 internal_id = str(target_entity.id)
                 if internal_id.startswith("-100"):
                     internal_id = internal_id[4:]
-                post_link = f"https://t.me/c/{internal_id}/{message.id}"
+                post_link = f"https://t.me/c/{internal_id}/{target_message.id}"
 
-            product_ref = str(message.id)
+            product_ref = str(target_message.id)
 
-            # Create data structure matching the first code's format but with target channel links
+            # Create data structure
             post_data = {
                 "title": info["title"],
                 "description": info["description"],
                 "price": info["price"],
                 "phone": info["phone"],
                 "location": info["location"],
-                "date": message.date.strftime("%Y-%m-%d %H:%M:%S"),
+                "date": target_message.date.strftime("%Y-%m-%d %H:%M:%S"),
                 "channel": channel_username,  # Keep source channel name
                 "post_link": post_link,       # Link to target channel
                 "product_ref": product_ref,   # ID in target channel
@@ -1214,15 +1253,15 @@ async def scrape_channel_7days_async(channel_username: str):
                 "predicted_category": predicted_category,
                 "generated_description": generated_description,
                 "ai_enhanced": True,
-                "has_media": bool(message.media),
-                "has_text": bool(message.text),
-                "source_message_id": message.id,  # Keep track of source for debugging
-                "target_message_id": message.id   # Same as product_ref for consistency
+                "has_media": bool(target_message.media),
+                "has_text": bool(target_message.text),
+                "source_message_id": matching_source['source_message_id'],  # Original source ID
+                "target_message_id": target_message.id   # Target channel ID
             }
             scraped_data.append(post_data)
         
         print(f"📋 Found {len(scraped_data)} total messages with AI enhancement from {channel_username}")
-        print(f"📊 Statistics: Scanned {message_count} total messages, {total_messages_found} with text in last 7 days")
+        print(f"📊 Statistics: {len(source_messages)} source messages, {len(scraped_data)} matched in target channel")
         
         # Load existing data DIRECTLY FROM S3
         existing_df = load_parquet_from_s3()
@@ -1300,7 +1339,6 @@ def scrape_channel_7days_sync(channel_username: str):
     except Exception as e:
         track_session_usage("scraping", False, f"Sync error: {str(e)}")
         return False, f"❌ Scraping error: {str(e)}"
-    
 # ======================
 # Bot commands (remain the same but now use pure S3 functions)
 # ======================
