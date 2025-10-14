@@ -1241,7 +1241,7 @@ async def scrape_channel_7days_async(channel_username: str):
                     internal_id = str(source_entity.id)
                     if internal_id.startswith("-100"):
                         internal_id = internal_id[4:]
-                    post_link = f"https://t.me/c/{internal_id}/{message.id}"
+                    post_link = f"https://t.me/c/{internal_id}/{target_message.id}"
                 
                 product_ref = str(message.id)
                 print(f"⚠️ Using source message (not forwarded): {message.id}")
