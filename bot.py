@@ -97,12 +97,19 @@ def query_huggingface_api(payload, model_name, max_retries=3):
     return None
 
 def ai_classify_text(text, categories):
-    """Classify text using Hugging Face zero-shot classification"""
+    """Classify text using Hugging Face zero-shot classification with better candidate labels"""
+    # Use more specific and relevant candidate labels
     candidate_labels = [cat["name"] for cat in categories]
+    
+    # Add common product types that appear in your data
+    extended_labels = candidate_labels + [
+        "Urgent", "Vehicle", "Car", "Real Estate", "Property", 
+        "Job", "Employment", "Service", "Business", "Electronics"
+    ]
     
     payload = {
         "inputs": text,
-        "parameters": {"candidate_labels": candidate_labels}
+        "parameters": {"candidate_labels": extended_labels}
     }
     
     result = query_huggingface_api(payload, "facebook/bart-large-mnli")
@@ -115,60 +122,81 @@ def ai_classify_text(text, categories):
     return None
 
 def ai_summarize_text(text):
-    """Summarize text using Hugging Face summarization"""
+    """Summarize text using Hugging Face summarization with better parameters"""
     if len(text) < 50:
         return text
     
     payload = {
         "inputs": text,
-        "parameters": {"max_length": 40, "min_length": 10, "do_sample": False}
+        "parameters": {
+            "max_length": 60,  # Increased for better summaries
+            "min_length": 20,
+            "do_sample": False
+        }
     }
     
     result = query_huggingface_api(payload, "facebook/bart-large-cnn")
     
     if result and isinstance(result, list) and len(result) > 0:
-        return result[0].get("summary_text", text[:80])
+        summary = result[0].get("summary_text", text[:80])
+        # Clean up the summary
+        summary = re.sub(r'\s+', ' ', summary).strip()
+        return summary
     return text[:80]
 
 def extract_keywords_with_regex(text):
-    """Simple keyword extraction using regex patterns (no NER model needed)"""
+    """Enhanced keyword extraction using regex patterns"""
     text = clean_text(text).lower()
     
-    # Common product-related patterns
+    # Enhanced product-related patterns
     patterns = {
-        'electronics': r'\b(phone|smartphone|laptop|tablet|computer|tv|television|headphone|earphone|camera|watch)\b',
-        'fashion': r'\b(shirt|dress|jeans|shoe|sneaker|bag|jacket|coat|accessory|jewelry)\b',
-        'home': r'\b(furniture|sofa|chair|table|bed|mattress|decor|kitchen|appliance)\b',
-        'beauty': r'\b(cosmetic|makeup|skincare|perfume|fragrance|cream|lotion|shampoo)\b',
-        'sports': r'\b(sport|football|basketball|tennis|gym|fitness|equipment|gear)\b',
-        'vehicles': r'\b(car|bike|motorcycle|vehicle|auto|automobile)\b',
-        'books': r'\b(book|novel|literature|magazine|textbook)\b',
-        'groceries': r'\b(food|grocery|fruit|vegetable|meat|drink|beverage)\b'
+        'Electronics': r'\b(phone|smartphone|laptop|tablet|computer|tv|television|headphone|earphone|camera|watch|macbook|iphone|samsung)\b',
+        'Fashion': r'\b(shirt|dress|jeans|shoe|sneaker|bag|jacket|coat|accessory|jewelry|clothing|wear)\b',
+        'Home Goods': r'\b(furniture|sofa|chair|table|bed|mattress|decor|kitchen|appliance|house|apartment)\b',
+        'Beauty': r'\b(cosmetic|makeup|skincare|perfume|fragrance|cream|lotion|shampoo|beauty|glam)\b',
+        'Sports': r'\b(sport|football|basketball|tennis|gym|fitness|equipment|gear|exercise|training)\b',
+        'Vehicles': r'\b(car|bike|motorcycle|vehicle|auto|automobile|toyota|honda|bmw|mercedes|ford|chevrolet)\b',
+        'Books': r'\b(book|novel|literature|magazine|textbook|reading|author|story)\b',
+        'Groceries': r'\b(food|grocery|fruit|vegetable|meat|drink|beverage|rice|pasta|bread)\b',
+        'Real Estate': r'\b(house|apartment|property|land|rent|sale|villa|condo|building|realestate)\b',
+        'Jobs': r'\b(job|employment|work|career|vacancy|position|hire|recruitment|opportunity)\b',
+        'Services': r'\b(service|repair|maintenance|cleaning|delivery|transport|consultation)\b'
     }
     
     for category, pattern in patterns.items():
         if re.search(pattern, text):
             return category
     
-    # Fallback: extract simple nouns
+    # Check for urgency indicators
+    if re.search(r'\burgent\b|\brush\b|\bemergency\b|\bquick\b|\bfast\b', text, re.IGNORECASE):
+        return "Urgent"
+    
+    # Enhanced noun extraction
     words = re.findall(r'\b[a-z]{4,}\b', text)
     common_nouns = [word for word in words if word not in [
-        'item', 'product', 'thing', 'restocked', 'detail', 'catch', 'new', 'sale', 'price', 'contact'
+        'item', 'product', 'thing', 'restocked', 'detail', 'catch', 'new', 'sale', 
+        'price', 'contact', 'sell', 'buy', 'market', 'telegram', 'channel'
     ]]
     
-    return common_nouns[0].capitalize() if common_nouns else "Miscellaneous"
+    return common_nouns[0].capitalize() if common_nouns else "Other"
 
 def propose_new_category(text, classification_results, existing_categories):
-    """Propose category using API classification and keyword extraction"""
+    """Enhanced category proposal using API classification and keyword extraction"""
+    text_lower = text.lower()
+    
+    # Check for urgency first
+    if any(word in text_lower for word in ['urgent', 'rush', 'emergency', 'quick sale']):
+        return "Urgent"
+    
     if classification_results and classification_results["labels"]:
         top_category = classification_results["labels"][0]
         top_score = classification_results["scores"][0]
         
         # If confidence is high, use the classified category
-        if top_score > 0.7:
+        if top_score > 0.6:  # Lowered threshold for better categorization
             return top_category
     
-    # Fallback to keyword extraction
+    # Enhanced keyword extraction
     keyword_category = extract_keywords_with_regex(text)
     
     # Check if keyword category matches any existing category
@@ -176,11 +204,15 @@ def propose_new_category(text, classification_results, existing_categories):
         if keyword_category.lower() in category["name"].lower():
             return category["name"]
     
-    return keyword_category if keyword_category != "Miscellaneous" else "Other"
+    # Special handling for vehicle-related content
+    if any(word in text_lower for word in ['toyota', 'honda', 'bmw', 'mercedes', 'car', 'vehicle', 'auto']):
+        return "Vehicles"
+    
+    return keyword_category if keyword_category != "Other" else "Miscellaneous"
 
-# === 📚 Dynamic Categories (Same as before but with API) ===
+# === 📚 Dynamic Categories ===
 def load_categories():
-    """Load categories from MongoDB"""
+    """Load categories from MongoDB with enhanced default categories"""
     default_categories = [
         {"name": "Electronics", "description": "Devices like phones, laptops, and gadgets"},
         {"name": "Fashion", "description": "Clothing, shoes, and accessories"},
@@ -191,7 +223,11 @@ def load_categories():
         {"name": "Groceries", "description": "Food and grocery items"},
         {"name": "Vehicles", "description": "Cars, bikes, and vehicles"},
         {"name": "Medicine", "description": "Medicines and health remedies"},
-        {"name": "Perfume", "description": "Fragrances, colognes, and perfumes"}
+        {"name": "Perfume", "description": "Fragrances, colognes, and perfumes"},
+        {"name": "Real Estate", "description": "Properties, houses, and apartments"},
+        {"name": "Jobs", "description": "Employment opportunities and vacancies"},
+        {"name": "Services", "description": "Various services and professional work"},
+        {"name": "Urgent", "description": "Urgent sales and time-sensitive offers"}
     ]
     stored_categories = categories_collection.find_one({"_id": "categories"})
     if stored_categories and "categories" in stored_categories:
@@ -209,7 +245,7 @@ def save_categories(categories):
     )
 
 def enrich_product_with_ai(title, desc):
-    """Enhanced product enrichment using Hugging Face API"""
+    """Enhanced product enrichment using Hugging Face API with better logic"""
     text = desc if isinstance(desc, str) and len(desc) > 10 else title
     text = clean_text(text)
     
@@ -242,10 +278,14 @@ def enrich_product_with_ai(title, desc):
         print(f"⚠️ Classification error: {e}")
         category = extract_keywords_with_regex(text) or "Unknown"
 
-    # Summarized description using API
+    # Enhanced summarized description using API
     try:
         if len(text) > 50:
+            # Use a more focused summary for product descriptions
             summary = ai_summarize_text(text)
+            # Clean up the summary to remove redundant information
+            summary = re.sub(r'(URGENT SELL|URGENT|SELL|BUY)\s+', '', summary, flags=re.IGNORECASE)
+            summary = re.sub(r'\s+', ' ', summary).strip()
         else:
             summary = text
     except Exception as e:
@@ -1090,7 +1130,7 @@ def check_session_usage(update, context):
 # 7-day scraping function with PURE S3 integration
 # ======================
 async def scrape_channel_7days_async(channel_username: str):
-    """Scrape last 7 days of data directly from source channel with AI enrichment - FIXED VERSION"""
+    """Scrape last 7 days of data and link to forwarded messages in target channel - MATCHING FIRST CODE LOGIC"""
     telethon_client = None
     
     try:
@@ -1104,8 +1144,14 @@ async def scrape_channel_7days_async(channel_username: str):
         print(f"🔍 Starting 7-day scrape with AI enrichment for channel: {channel_username}")
         
         try:
-            entity = await telethon_client.get_entity(channel_username)
-            print(f"✅ Source channel found: {entity.title}")
+            # Get the SOURCE channel entity (where we scrape FROM)
+            source_entity = await telethon_client.get_entity(channel_username)
+            print(f"✅ Source channel found: {source_entity.title}")
+            
+            # Get the TARGET channel entity (where messages are forwarded TO)
+            target_entity = await telethon_client.get_entity(FORWARD_CHANNEL)
+            print(f"✅ Target channel found: {target_entity.title}")
+            
         except (ChannelInvalidError, UsernameInvalidError, UsernameNotOccupiedError) as e:
             track_session_usage("scraping", False, f"Invalid channel: {str(e)}")
             return False, f"❌ Channel {channel_username} is invalid or doesn't exist."
@@ -1114,56 +1160,93 @@ async def scrape_channel_7days_async(channel_username: str):
         cutoff = now - timedelta(days=7)
         print(f"⏰ Scraping ALL messages from last 7 days (since {cutoff})")
 
+        # Load forwarded messages data to map source→target messages
+        forwarded_data = load_json_from_s3(f"data/{FORWARDED_FILE}")
+        forwarded_ids = {
+            int(msg_id): datetime.strptime(ts, "%Y-%m-%d %H:%M:%S") 
+            for msg_id, ts in forwarded_data.items()
+        } if forwarded_data else {}
+
+        # Build mapping of source message IDs to target message IDs by scanning target channel
+        source_to_target_map = {}
+        print(f"🔍 Building message mapping from target channel {FORWARD_CHANNEL}...")
+        
+        target_message_count = 0
+        async for target_message in telethon_client.iter_messages(target_entity, limit=500):  # Limit to recent 500 messages
+            target_message_count += 1
+            if target_message_count % 50 == 0:
+                print(f"📊 Scanned {target_message_count} target messages...")
+                
+            if target_message.forward:
+                # This is a forwarded message, get the original source message ID
+                if (hasattr(target_message.forward, 'original_fwd') and 
+                    target_message.forward.original_fwd and 
+                    hasattr(target_message.forward.original_fwd, 'channel_id') and
+                    str(target_message.forward.original_fwd.channel_id) == str(source_entity.id)):
+                    
+                    source_msg_id = target_message.forward.original_fwd.id
+                    source_to_target_map[source_msg_id] = target_message.id
+                    print(f"🔗 Mapped source:{source_msg_id} → target:{target_message.id}")
+        
+        print(f"✅ Built mapping for {len(source_to_target_map)} forwarded messages")
+
         scraped_data = []
         message_count = 0
         total_messages_found = 0
         
-        print(f"📡 Collecting ALL messages from source channel: {channel_username}")
+        print(f"📡 Collecting messages from source channel: {channel_username}")
         
-        # FIX: Remove the limit=200 and use the SAME logic as forwarding
-        async for message in telethon_client.iter_messages(entity, limit=None):  # REMOVED limit=200
+        # Use the EXACT same logic as first code: iterate through source channel messages
+        async for message in telethon_client.iter_messages(source_entity, limit=None):
             message_count += 1
-            if message_count % 20 == 0:  # Less frequent logging
-                print(f"📊 Scanned {message_count} messages... Found {total_messages_found} valid messages")
+            if message_count % 20 == 0:
+                print(f"📊 Scanned {message_count} source messages... Found {total_messages_found} valid messages")
                 
-            # FIX: Use the SAME cutoff logic as forwarding
             if message.date < cutoff:
                 print(f"⏹️ Reached 7-day cutoff. Scanned {message_count} total messages, found {total_messages_found} valid messages in last 7 days")
                 break
                 
-            # FIX: Include BOTH text and media messages (same as forwarding)
-            if not message.text and not message.media:
-                continue  # Skip messages with no content
+            # Skip messages without text (same as first code)
+            if not message.text:
+                continue
 
             total_messages_found += 1
             
-            # Extract info from message text, or create basic info for media messages
-            if message.text:
-                info = extract_info(message.text, message.id)
-            else:
-                # For media-only messages, create basic info
-                info = {
-                    "title": "Media Post",
-                    "description": f"Media message from {channel_username}",
-                    "price": "",
-                    "phone": "",
-                    "location": "",
-                    "channel_mention": channel_username,
-                    "product_ref": str(message.id)
-                }
-
-            # AI ENHANCEMENT
-            print(f"🤖 AI enriching message {message.id}: {info['title'][:50]}...")
-            predicted_category, generated_description = enrich_product_with_ai(info["title"], info["description"])
+            # Extract info from message text using the EXACT same function as first code
+            info = extract_info(message.text, message.id)
             
-            if getattr(entity, "username", None):
-                post_link = f"https://t.me/{entity.username}/{message.id}"
+            # AI ENHANCEMENT using the EXACT same function as first code
+            print(f"🤖 AI enriching message {message.id}: {info['title'][:50]}...")
+            predicted_category, generated_description = enrich_product_with_ai(info["title"], info["description"])            
+            # 🔥 KEY CHANGE: Use TARGET channel for post_link and product_ref
+            target_message_id = source_to_target_map.get(message.id)
+            
+            if target_message_id:
+                # This message was forwarded, use target channel info
+                if getattr(target_entity, "username", None):
+                    post_link = f"https://t.me/{target_entity.username}/{target_message_id}"
+                else:
+                    internal_id = str(target_entity.id)
+                    if internal_id.startswith("-100"):
+                        internal_id = internal_id[4:]
+                    post_link = f"https://t.me/c/{internal_id}/{target_message_id}"
+                
+                product_ref = str(target_message_id)
+                print(f"✅ Using forwarded message: source:{message.id} → target:{target_message_id}")
             else:
-                internal_id = str(entity.id)
-                if internal_id.startswith("-100"):
-                    internal_id = internal_id[4:]
-                post_link = f"https://t.me/c/{internal_id}/{message.id}"
+                # Message wasn't forwarded (shouldn't happen if forwarding worked), fallback to source
+                if getattr(source_entity, "username", None):
+                    post_link = f"https://t.me/{source_entity.username}/{message.id}"
+                else:
+                    internal_id = str(source_entity.id)
+                    if internal_id.startswith("-100"):
+                        internal_id = internal_id[4:]
+                    post_link = f"https://t.me/c/{internal_id}/{message.id}"
+                
+                product_ref = str(message.id)
+                print(f"⚠️ Using source message (not forwarded): {message.id}")
 
+            # Create data structure matching the first code's format but with target channel links
             post_data = {
                 "title": info["title"],
                 "description": info["description"],
@@ -1171,20 +1254,23 @@ async def scrape_channel_7days_async(channel_username: str):
                 "phone": info["phone"],
                 "location": info["location"],
                 "date": message.date.strftime("%Y-%m-%d %H:%M:%S"),
-                "channel": channel_username,
-                "post_link": post_link,
-                "product_ref": str(message.id),
+                "channel": channel_username,  # Keep source channel name
+                "post_link": post_link,       # Link to target channel
+                "product_ref": product_ref,   # ID in target channel
                 "scraped_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "predicted_category": predicted_category,
                 "generated_description": generated_description,
                 "ai_enhanced": True,
                 "has_media": bool(message.media),
-                "has_text": bool(message.text)
+                "has_text": bool(message.text),
+                "source_message_id": message.id,  # Keep track of source for debugging
+                "target_message_id": target_message_id if target_message_id else None
             }
             scraped_data.append(post_data)
         
         print(f"📋 Found {len(scraped_data)} total messages with AI enhancement from {channel_username}")
-        print(f"📊 Statistics: Scanned {message_count} messages, {total_messages_found} in last 7 days")
+        print(f"📊 Statistics: Scanned {message_count} total messages, {total_messages_found} with text in last 7 days")
+        print(f"🔗 Forwarded messages mapped: {len([d for d in scraped_data if d['target_message_id'] is not None])}")
         
         # Load existing data DIRECTLY FROM S3
         existing_df = load_parquet_from_s3()
@@ -1195,7 +1281,7 @@ async def scrape_channel_7days_async(channel_username: str):
         
         new_df = pd.DataFrame(scraped_data)
         if not new_df.empty:
-            # Combine and deduplicate
+            # Combine and deduplicate by product_ref (which is now target message ID)
             combined_df = pd.concat([existing_df, new_df], ignore_index=True)
             combined_df = combined_df.drop_duplicates(subset=['product_ref', 'channel'], keep='last')
             
@@ -1210,9 +1296,19 @@ async def scrape_channel_7days_async(channel_username: str):
                 for category, count in category_counts.head(5).items():
                     print(f"  • {category}: {count} products")
                 
+                # Print forwarding stats
+                forwarded_count = len([d for d in scraped_data if d['target_message_id'] is not None])
+                not_forwarded_count = len(scraped_data) - forwarded_count
+                print(f"📤 Forwarding Stats: {forwarded_count} forwarded, {not_forwarded_count} not forwarded")
+                
                 new_count = len(combined_df) - len(existing_df)
                 track_session_usage("scraping", True, f"Scraped {len(scraped_data)} messages with AI")
-                return True, f"✅ Scraped {len(scraped_data)} messages from {channel_username}. Added {new_count} new AI-enhanced records to database."
+                
+                result_msg = f"✅ Scraped {len(scraped_data)} messages from {channel_username}. "
+                result_msg += f"Added {new_count} new AI-enhanced records to database. "
+                result_msg += f"({forwarded_count} linked to {FORWARD_CHANNEL})"
+                
+                return True, result_msg
             else:
                 track_session_usage("scraping", False, "S3 save failed")
                 return False, f"❌ Failed to save AI-enhanced data for {channel_username} to S3."
@@ -1719,9 +1815,6 @@ def main():
         )
         print("✅ Bot started successfully!")
         updater.idle()
-    except Conflict as e:
-        print(f"❌ Bot conflict error: {e}")
-        print("💡 Another bot instance might be running. Wait a few minutes and try again.")
     except KeyboardInterrupt:
         print("\n🛑 Shutting down bot...")
     except Exception as e:
