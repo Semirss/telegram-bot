@@ -1579,7 +1579,7 @@ def unknown_command(update, context):
         "/listchannels\n"
         "/checkchannel @ChannelUsername\n"
         "/deletechannel @ChannelUsername\n"
-        "/setup_session - Set up Telegram session\n"
+        "/setup - Set up Telegram session\n"
         "/check_session - Check session status\n"
         "/checksessionusage - Session usage stats\n"
         "/test - Test connection\n"
