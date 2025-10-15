@@ -672,7 +672,6 @@ async def get_telethon_client():
                 return None
     
     return None
-
 # ======================
 # Forward last 7d posts with PURE S3 integration
 # ======================
@@ -725,16 +724,22 @@ async def forward_last_7d_async(channel_username: str):
         print(f"⏰ Forwarding messages since: {cutoff}")
 
         # Load previously forwarded messages with timestamps - DIRECT FROM S3
-        forwarded_data = load_json_from_s3(f"data/{FORWARDED_FILE}")
+        all_forwarded_data = load_json_from_s3(f"data/{FORWARDED_FILE}")
+        if not isinstance(all_forwarded_data, dict):
+            all_forwarded_data = {}
+        
+        # Get or initialize for this channel
+        channel_forwarded = all_forwarded_data.get(channel_username, {})
+        
         forwarded_ids = {
             int(msg_id): datetime.strptime(ts, "%Y-%m-%d %H:%M:%S") 
-            for msg_id, ts in forwarded_data.items()
-        } if forwarded_data else {}
+            for msg_id, ts in channel_forwarded.items()
+        } if channel_forwarded else {}
 
         # Remove forwarded IDs older than 7 days
         week_cutoff = now - timedelta(days=7)
         forwarded_ids = {msg_id: ts for msg_id, ts in forwarded_ids.items() 
-                        if ts >= week_cutoff.replace(tzinfo=None)}
+                         if ts >= week_cutoff.replace(tzinfo=None)}
 
         messages_to_forward = []
         message_count = 0
@@ -809,11 +814,11 @@ async def forward_last_7d_async(channel_username: str):
                 print(f"⚠️ Unexpected error forwarding from {channel_username}: {e}")
                 continue
 
-        # Save updated forwarded IDs DIRECTLY TO S3
-        save_json_to_s3(
-            {str(k): v.strftime("%Y-%m-%d %H:%M:%S") for k, v in forwarded_ids.items()},
-            f"data/{FORWARDED_FILE}"
-        )
+        # Update channel data and save entire structure DIRECTLY TO S3
+        all_forwarded_data[channel_username] = {
+            str(k): v.strftime("%Y-%m-%d %H:%M:%S") for k, v in forwarded_ids.items()
+        }
+        save_json_to_s3(all_forwarded_data, f"data/{FORWARDED_FILE}")
 
         if total_forwarded > 0:
             track_session_usage("forwarding", True, f"Forwarded {total_forwarded} messages")
@@ -858,7 +863,6 @@ def forward_last_7d_sync(channel_username: str):
     except Exception as e:
         track_session_usage("forwarding", False, f"Sync error: {str(e)}")
         return False, f"❌ Error: {str(e)}"
-
 # ======================
 # Session management commands with S3
 # ======================
@@ -1162,7 +1166,7 @@ async def scrape_channel_7days_async(channel_username: str):
                     internal_id = internal_id[4:]
                 post_link = f"https://t.me/c/{internal_id}/{target_message.id}"
 
-            product_ref = str(target_message.id)
+            product_ref = f"{channel_username}_{matching_source['source_message_id']}"
 
             # Create data structure
             post_data = {
@@ -1174,7 +1178,7 @@ async def scrape_channel_7days_async(channel_username: str):
                 "date": target_message.date.strftime("%Y-%m-%d %H:%M:%S"),
                 "channel": channel_username,  # Keep source channel name
                 "post_link": post_link,       # Link to target channel
-                "product_ref": product_ref,   # ID in target channel
+                "product_ref": product_ref,   # Unique based on source channel + source ID
                 "scraped_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "predicted_category": predicted_category,
                 "generated_description": generated_description,
@@ -1195,7 +1199,7 @@ async def scrape_channel_7days_async(channel_username: str):
         print(f"📁 Loaded existing data with {len(existing_data)} records from S3 JSON")
 
         if scraped_data:
-            # Combine and deduplicate by product_ref (which is now target message ID)
+            # Combine and deduplicate by product_ref (now source channel + source message ID)
             combined_data = existing_data.copy()
             
             # Create a set of existing product_refs for quick lookup
@@ -1530,6 +1534,7 @@ def unknown_command(update, context):
         "/debug_json - Debug a json file in S3\n"
         "/test_s3_write - Test S3 write access\n"
         "/debug_json_comprehensive - Comprehensive json debug"
+        "/getscrapedjson - get json file"
     )
 
 @authorized
@@ -1606,7 +1611,40 @@ def test_connection(update, context):
             context.bot.send_message(update.effective_chat.id, text=f"❌ Test failed: {e}")
     
     threading.Thread(target=run_test, daemon=True).start()
-
+@authorized
+def get_scraped_json(update, context):
+    """Download and send the scraped JSON file directly from S3 to Telegram"""
+    try:
+        s3_key = f"data/{SCRAPED_DATA_FILE}"
+        
+        # Check if file exists in S3
+        if not file_exists_in_s3(s3_key):
+            update.message.reply_text(f"File {SCRAPED_DATA_FILE} not found in S3.")
+            return
+        
+        # Download the file content directly from S3
+        response = s3.get_object(Bucket=AWS_BUCKET_NAME, Key=s3_key)
+        json_content = response['Body'].read()
+        
+        # Create a BytesIO buffer to send as document
+        buffer = io.BytesIO(json_content)
+        buffer.name = SCRAPED_DATA_FILE  # Set filename for Telegram
+        
+        # Send the file
+        update.message.reply_document(
+            document=buffer,
+            filename=SCRAPED_DATA_FILE,
+            caption=f"Here is the current scraped data from S3.\nSize: {len(json_content)} bytes"
+        )
+        
+        print(f"Sent {SCRAPED_DATA_FILE} to user {update.effective_user.id}")
+        track_session_usage("get_json", True, f"Sent {SCRAPED_DATA_FILE}")
+        
+    except Exception as e:
+        error_msg = f"Error sending JSON file: {str(e)}"
+        update.message.reply_text(f"Failed to retrieve file: {error_msg}")
+        print(error_msg)
+        track_session_usage("get_json", False, error_msg)
 @authorized
 def diagnose_session(update, context):
     """Diagnose session issues"""
@@ -1717,6 +1755,7 @@ def main():
     dp.add_handler(CommandHandler("clearhistory", clear_forwarded_history))
     dp.add_handler(CommandHandler("diagnose", diagnose_session))
     dp.add_handler(CommandHandler("debug_json", debug_s3_json))
+    dp.add_handler(CommandHandler("getscrapedjson", get_scraped_json))
     dp.add_handler(CommandHandler("debug_json_comprehensive", debug_json_comprehensive))
     dp.add_handler(MessageHandler(Filters.command, unknown_command))
 
