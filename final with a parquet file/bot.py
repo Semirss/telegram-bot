@@ -60,7 +60,7 @@ s3 = boto3.client(
 
 # === 📁 File names (S3 only) ===
 FORWARDED_FILE = "forwarded_messages.json"
-SCRAPED_DATA_FILE = "scraped_data.json"
+scraped_7d = "scraped_7d.parquet"
 
 # === 🤖 AI Enhancement with Hugging Face API ===
 HF_API_TOKEN = os.getenv("HF_API_TOKEN")
@@ -395,36 +395,80 @@ def save_json_to_s3(data, s3_key):
         print(f"❌ Error saving JSON to S3: {e}")
         return False
 
-def load_scraped_data_from_s3():
-    """Load scraped data directly from S3 JSON file"""
+# Parquet data functions - DIRECT S3 access (no local files)
+def load_parquet_from_s3():
+    """Load parquet data directly from S3 without downloading files"""
     try:
-        data = load_json_from_s3(f"data/{SCRAPED_DATA_FILE}")
-        if isinstance(data, list):
-            print(f"✅ Loaded {len(data)} records from JSON: {SCRAPED_DATA_FILE}")
-            return data
-        else:
-            print(f"⚠️ JSON file {SCRAPED_DATA_FILE} is not a list, returning empty list")
-            return []
+        response = s3.get_object(Bucket=AWS_BUCKET_NAME, Key=f"data/{scraped_7d}")
+        df = pd.read_parquet(io.BytesIO(response['Body'].read()))
+        print(f"✅ Loaded parquet from S3: {scraped_7d}")
+        return df
+    except s3.exceptions.NoSuchKey:
+        print(f"⚠️ Parquet file {scraped_7d} not found in S3, returning empty DataFrame")
+        return pd.DataFrame()
     except Exception as e:
-        print(f"❌ Error loading scraped data from S3: {e}")
-        return []
+        print(f"❌ Error loading parquet from S3: {e}")
+        return pd.DataFrame()
 
-def save_scraped_data_to_s3(data):
-    """Save scraped data to S3 as JSON"""
+def save_parquet_to_s3(df):
+    """Save parquet data to S3 ONLY using the proven approach from test script"""
     try:
-        if not data:
-            print("⚠️ Data is empty, nothing to save")
+        if df.empty:
+            print("⚠️ DataFrame is empty, nothing to save")
             return False
             
-        print(f"💾 Attempting to save {len(data)} records to S3 as JSON...")
+        print(f"💾 Attempting to save {len(df)} records to S3...")
         
-        success = save_json_to_s3(data, f"data/{SCRAPED_DATA_FILE}")
+        # Use in-memory buffer (same as test script)
+        buffer = io.BytesIO()
         
-        if success:
-            print(f"✅ Successfully saved {len(data)} records to S3 as JSON")
+        # Try different parquet engines (same as test script)
+        engines = ['pyarrow', 'fastparquet', 'auto']
+        success = False
+        
+        for engine in engines:
+            try:
+                print(f"🔄 Trying parquet engine: {engine}")
+                buffer.seek(0)  # Reset buffer
+                df.to_parquet(buffer, engine=engine, index=False)
+                success = True
+                print(f"✅ Success with engine: {engine}")
+                break
+            except Exception as e:
+                print(f"❌ Engine {engine} failed: {e}")
+                continue
+        
+        if not success:
+            print("❌ All parquet engines failed")
+            return False
+        
+        buffer.seek(0)
+        
+        # S3 key with proper path
+        s3_key = f"data/{scraped_7d}"
+        print(f"📤 Uploading to S3 bucket: {AWS_BUCKET_NAME}")
+        
+        # Upload to S3 (same as test script)
+        s3.upload_fileobj(
+            buffer, 
+            AWS_BUCKET_NAME, 
+            s3_key,
+            ExtraArgs={'ContentType': 'application/octet-stream'}
+        )
+        
+        print(f"✅ Successfully uploaded {len(df)} records to S3")
+        
+        # Verify upload (same as test script)
+        try:
+            response = s3.head_object(Bucket=AWS_BUCKET_NAME, Key=s3_key)
+            file_size = response['ContentLength']
+            last_modified = response['LastModified']
+            print(f"✅ Upload verification successful!")
+            print(f"📏 File size: {file_size} bytes")
+            print(f"🕒 Last modified: {last_modified}")
             return True
-        else:
-            print("❌ Failed to save JSON to S3")
+        except Exception as e:
+            print(f"⚠️ Upload verification failed: {e}")
             return False
             
     except Exception as e:
@@ -914,12 +958,12 @@ def setup_session(update, context):
     threading.Thread(target=run_session_setup, daemon=True).start()
 
 @authorized
-def debug_json_comprehensive(update, context):
-    """Comprehensive debug command to check S3 JSON files"""
+def debug_parquet_comprehensive(update, context):
+    """Comprehensive debug command to check S3 parquet files"""
     try:
-        s3_key = f"data/{SCRAPED_DATA_FILE}"
+        s3_key = f"data/{scraped_7d}"
         
-        msg = f"🔍 <b>Comprehensive JSON Debug (S3 ONLY)</b>\n\n"
+        msg = f"🔍 <b>Comprehensive Parquet Debug (S3 ONLY)</b>\n\n"
         
         # Check S3 file
         s3_exists = file_exists_in_s3(s3_key)
@@ -934,35 +978,64 @@ def debug_json_comprehensive(update, context):
                 msg += f"🕒 <b>S3 Modified:</b> {s3_modified}\n"
                 
                 # Try to load S3 data
-                s3_data = load_scraped_data_from_s3()
-                if s3_data:
-                    msg += f"📊 <b>S3 Data:</b> {len(s3_data)} records\n"
-                    
-                    # Convert to DataFrame for analysis
-                    import pandas as pd
-                    df = pd.DataFrame(s3_data)
-                    
-                    msg += f"\n📈 <b>Data Summary:</b>\n"
-                    msg += f"• Total Records: {len(s3_data)}\n"
-                    if 'date' in df.columns:
-                        msg += f"• Date Range: {df['date'].min() if 'date' in df.columns else 'N/A'} to {df['date'].max() if 'date' in df.columns else 'N/A'}\n"
-                    if 'channel' in df.columns:
-                        msg += f"• Channels: {df['channel'].nunique() if 'channel' in df.columns else 'N/A'}\n"
-                    
-                    if 'channel' in df.columns:
-                        msg += f"\n🔍 <b>Top Channels:</b>\n"
-                        channel_counts = df['channel'].value_counts().head(3)
-                        for channel, count in channel_counts.items():
-                            msg += f"• {channel}: {count} records\n"
+                s3_df = load_parquet_from_s3()
+                if not s3_df.empty:
+                    msg += f"📊 <b>S3 Data:</b> {len(s3_df)} records\n"
                 else:
                     msg += "⚠️ S3 file exists but contains no data\n"
             except Exception as e:
                 msg += f"❌ <b>S3 Error:</b> {e}\n"
         
+        # Data summary if available
+        if not s3_df.empty:
+            msg += f"\n📈 <b>Data Summary:</b>\n"
+            msg += f"• Total Records: {len(s3_df)}\n"
+            msg += f"• Date Range: {s3_df['date'].min() if 'date' in s3_df.columns else 'N/A'} to {s3_df['date'].max() if 'date' in s3_df.columns else 'N/A'}\n"
+            msg += f"• Channels: {s3_df['channel'].nunique() if 'channel' in s3_df.columns else 'N/A'}\n"
+            
+            if 'channel' in s3_df.columns:
+                msg += f"\n🔍 <b>Top Channels:</b>\n"
+                channel_counts = s3_df['channel'].value_counts().head(3)
+                for channel, count in channel_counts.items():
+                    msg += f"• {channel}: {count} records\n"
+        
         update.message.reply_text(msg, parse_mode="HTML")
         
     except Exception as e:
         update.message.reply_text(f"❌ Comprehensive debug error: {e}")
+
+@authorized
+def test_s3_write(update, context):
+    """Test S3 write functionality with a small sample"""
+    try:
+        # Create test data
+        test_data = {
+            "title": ["Test Product"],
+            "description": ["Test Description"],
+            "price": ["100"],
+            "phone": ["+251911223344"],
+            "location": ["Test Location"],
+            "date": [datetime.now().strftime("%Y-%m-%d %H:%M:%S")],
+            "channel": ["@testchannel"],
+            "post_link": ["https://t.me/test/1"],
+            "product_ref": ["test123"],
+            "scraped_at": [datetime.now().strftime("%Y-%m-%d %H:%M:%S")]
+        }
+        
+        test_df = pd.DataFrame(test_data)
+        
+        update.message.reply_text("🧪 Testing S3 write functionality...")
+        
+        # Test the save function
+        success = save_parquet_to_s3(test_df)
+        
+        if success:
+            update.message.reply_text("✅ S3 write test PASSED!")
+        else:
+            update.message.reply_text("❌ S3 write test FAILED!")
+            
+    except Exception as e:
+        update.message.reply_text(f"❌ S3 write test error: {e}")
 
 @authorized
 def check_session(update, context):
@@ -1060,7 +1133,7 @@ async def scrape_channel_7days_async(channel_username: str):
     telethon_client = None
     
     try:
-        print("🔍 Loading json data directly from S3...")
+        print("🔍 Loading parquet data directly from S3...")
         
         telethon_client = await get_telethon_client()
         if not telethon_client:
@@ -1190,35 +1263,21 @@ async def scrape_channel_7days_async(channel_username: str):
         print(f"📋 Found {len(scraped_data)} total messages with AI enhancement from {channel_username}")
         print(f"📊 Statistics: {len(source_messages)} source messages, {len(scraped_data)} matched in target channel")
         
-            # Load existing data DIRECTLY FROM S3 JSON
-        existing_data = load_scraped_data_from_s3()
-                
-        print(f"📁 Loaded existing data with {len(existing_data)} records from S3 JSON")
-
-        if scraped_data:
-                        # Combine and deduplicate by product_ref (which is now target message ID)
-                        combined_data = existing_data.copy()
-            # Load existing data DIRECTLY FROM S3 JSON
-        existing_data = load_scraped_data_from_s3()
-
-        print(f"📁 Loaded existing data with {len(existing_data)} records from S3 JSON")
-
-        if scraped_data:
+        # Load existing data DIRECTLY FROM S3
+        existing_df = load_parquet_from_s3()
+        if existing_df is None:
+            existing_df = pd.DataFrame()
+        
+        print(f"📁 Loaded existing data with {len(existing_df)} records from S3")
+        
+        new_df = pd.DataFrame(scraped_data)
+        if not new_df.empty:
             # Combine and deduplicate by product_ref (which is now target message ID)
-            combined_data = existing_data.copy()
-
-            # Create a set of existing product_refs for quick lookup
-            existing_refs = {item['product_ref'] for item in existing_data}
-
-            # Add new items that don't exist
-            new_items_added = 0
-            for new_item in scraped_data:
-                if new_item['product_ref'] not in existing_refs:
-                    combined_data.append(new_item)
-                    new_items_added += 1
-
-                        # Save ONLY to S3 as JSON
-            success = save_scraped_data_to_ss(combined_data)
+            combined_df = pd.concat([existing_df, new_df], ignore_index=True)
+            combined_df = combined_df.drop_duplicates(subset=['product_ref', 'channel'], keep='last')
+            
+            # Save ONLY to S3
+            success = save_parquet_to_s3(combined_df)
             if success:
                 print(f"💾 Saved {len(combined_df)} total records to S3 with AI enhancement")
                 
@@ -1336,14 +1395,14 @@ def add_channel(update, context):
     except Exception as e:
         update.message.reply_text(f"❌ Unexpected error: {str(e)}")
 @authorized
-def debug_s3_json(update, context):
-    """Enhanced debug command to check S3 JSON file status"""
+def debug_s3_parquet(update, context):
+    """Enhanced debug command to check S3 parquet file status"""
     try:
-        s3_key = f"data/{SCRAPED_DATA_FILE}"
+        s3_key = f"data/{scraped_7d}"
         
         # Check if file exists in S3
         exists = file_exists_in_s3(s3_key)
-        msg = f"🔍 <b>S3 JSON Debug Information</b>\n\n"
+        msg = f"🔍 <b>S3 Parquet Debug Information</b>\n\n"
         msg += f"📁 <b>S3 Path:</b> {s3_key}\n"
         msg += f"✅ <b>File Exists:</b> {'Yes' if exists else 'No'}\n\n"
         
@@ -1360,25 +1419,17 @@ def debug_s3_json(update, context):
             
             # Try to load and show data
             try:
-                data = load_scraped_data_from_s3()
-                if data:
+                df = load_parquet_from_s3()
+                if not df.empty:
                     msg += f"📊 <b>Data Summary:</b>\n"
-                    msg += f"• Total Records: {len(data)}\n"
+                    msg += f"• Total Records: {len(df)}\n"
+                    msg += f"• Date Range: {df['date'].min()} to {df['date'].max()}\n"
+                    msg += f"• Channels: {df['channel'].nunique()}\n\n"
                     
-                    # Convert to DataFrame for analysis
-                    import pandas as pd
-                    df = pd.DataFrame(data)
-                    
-                    if 'date' in df.columns:
-                        msg += f"• Date Range: {df['date'].min()} to {df['date'].max()}\n"
-                    if 'channel' in df.columns:
-                        msg += f"• Channels: {df['channel'].nunique()}\n\n"
-                    
-                    if 'channel' in df.columns:
-                        msg += f"🔍 <b>Channel Distribution:</b>\n"
-                        channel_counts = df['channel'].value_counts()
-                        for channel, count in channel_counts.head(5).items():
-                            msg += f"• {channel}: {count} records\n"
+                    msg += f"🔍 <b>Channel Distribution:</b>\n"
+                    channel_counts = df['channel'].value_counts()
+                    for channel, count in channel_counts.head(5).items():
+                        msg += f"• {channel}: {count} records\n"
                 else:
                     msg += "⚠️ File exists but contains no data\n"
             except Exception as e:
@@ -1394,9 +1445,8 @@ def debug_s3_json(update, context):
 def check_scraped_data(update, context):
     """Check the current scraped data statistics from S3 with AI insights"""
     try:
-        data = load_scraped_data_from_s3()
-        if data:
-            df = pd.DataFrame(data)
+        df = load_parquet_from_s3()
+        if not df.empty:
             channel_counts = df['channel'].value_counts()
             
             msg = f"📊 <b>Scraped Data Summary (AI Enhanced):</b>\n"
@@ -1536,32 +1586,10 @@ def unknown_command(update, context):
         "/cleanup - Cleanup sessions\n"
         "/clearhistory - Clear forwarded history"
         "/diagnose - Diagnose session health\n"
-        "/debug_json - Debug a json file in S3\n"
+        "/debug_parquet - Debug a Parquet file in S3\n"
         "/test_s3_write - Test S3 write access\n"
-        "/debug_json_comprehensive - Comprehensive json debug"
+        "/debug_parquet_comprehensive - Comprehensive Parquet debug"
     )
-
-@authorized
-def cleanup_sessions(update, context):
-    """Clean up all temporary Telethon session files (except main user session)"""
-    try:
-        cleanup_telethon_sessions()
-        update.message.reply_text("✅ All temporary session files have been cleaned up.")
-    except Exception as e:
-        update.message.reply_text(f"❌ Error cleaning up sessions: {e}")
-
-@authorized
-def clear_forwarded_history(update, context):
-    """Clear the forwarded messages history from S3"""
-    try:
-        # Delete the forwarded file from S3
-        try:
-            s3.delete_object(Bucket=AWS_BUCKET_NAME, Key=f"data/{FORWARDED_FILE}")
-            update.message.reply_text("✅ Forwarded messages history cleared from S3.")
-        except Exception as e:
-            update.message.reply_text(f"❌ Error clearing history from S3: {e}")
-    except Exception as e:
-        update.message.reply_text(f"❌ Error clearing history: {e}")
 
 @authorized
 def test_connection(update, context):
@@ -1617,6 +1645,28 @@ def test_connection(update, context):
     threading.Thread(target=run_test, daemon=True).start()
 
 @authorized
+def cleanup_sessions(update, context):
+    """Clean up all temporary Telethon session files (except main user session)"""
+    try:
+        cleanup_telethon_sessions()
+        update.message.reply_text("✅ All temporary session files have been cleaned up.")
+    except Exception as e:
+        update.message.reply_text(f"❌ Error cleaning up sessions: {e}")
+
+@authorized
+def clear_forwarded_history(update, context):
+    """Clear the forwarded messages history from S3"""
+    try:
+        # Delete the forwarded file from S3
+        try:
+            s3.delete_object(Bucket=AWS_BUCKET_NAME, Key=f"data/{FORWARDED_FILE}")
+            update.message.reply_text("✅ Forwarded messages history cleared from S3.")
+        except Exception as e:
+            update.message.reply_text(f"❌ Error clearing history from S3: {e}")
+    except Exception as e:
+        update.message.reply_text(f"❌ Error clearing history: {e}")
+
+@authorized
 def diagnose_session(update, context):
     """Diagnose session issues"""
     try:
@@ -1658,10 +1708,9 @@ def start(update, context):
             "/cleanup - Cleanup sessions\n"
             "/clearhistory - Clear forwarded history\n"
             "/diagnose - Diagnose session health\n"
-            "/debug_json - Debug S3 JSON file\n"
-            "/debug_json - Debug a json file in S3\n"
+            "/debug_parquet - Debug a Parquet file in S3\n"
             "/test_s3_write - Test S3 write access\n"
-            "/debug_json_comprehensive - Comprehensive json debug"
+            "/debug_parquet_comprehensive - Comprehensive Parquet debug"
         )
     else:
         update.message.reply_text(
@@ -1725,8 +1774,9 @@ def main():
     dp.add_handler(CommandHandler("cleanup", cleanup_sessions))
     dp.add_handler(CommandHandler("clearhistory", clear_forwarded_history))
     dp.add_handler(CommandHandler("diagnose", diagnose_session))
-    dp.add_handler(CommandHandler("debug_json", debug_s3_json))
-    dp.add_handler(CommandHandler("debug_json_comprehensive", debug_json_comprehensive))
+    dp.add_handler(CommandHandler("debug_parquet", debug_s3_parquet))
+    dp.add_handler(CommandHandler("test_s3_write", test_s3_write))
+    dp.add_handler(CommandHandler("debug_parquet_comprehensive", debug_parquet_comprehensive))
     dp.add_handler(MessageHandler(Filters.command, unknown_command))
 
     print(f"🤖 Bot is running...")
