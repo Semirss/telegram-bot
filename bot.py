@@ -1056,10 +1056,10 @@ def check_session_usage(update, context):
     except Exception as e:
         update.message.reply_text(f"❌ Error checking session usage: {e}")
 # ======================
-# 7-day scraping function with PURE S3 integration
+# 7-day scraping function with PURE S3 integration - FIXED CUTOFF
 # ======================
 async def scrape_channel_7days_async(channel_username: str):
-    """Scrape last 7 days of data and link to forwarded messages in target channel - STRICT 7-DAY CUTOFF, USE FORWARDED IDS TO MAP TARGET MESSAGES"""
+    """Scrape last 7 days of data and link to forwarded messages in target channel - STRICT 7-DAY CUTOFF"""
     telethon_client = None
     
     try:
@@ -1087,20 +1087,23 @@ async def scrape_channel_7days_async(channel_username: str):
 
         now = datetime.now(timezone.utc)
         cutoff = now - timedelta(days=7)
-        print(f"Scraping messages from last 7 days (since {cutoff})")
+        print(f"STRICT 7-DAY CUTOFF: Scraping ONLY messages since {cutoff}")
 
-        # FIRST: Collect recent source messages (texts and IDs)
+        # FIRST: Collect recent source messages (texts and IDs) - WITHIN 7 DAYS ONLY
         source_messages = []
         source_id_to_text = {}
         
-        print(f"Scanning channel: {channel_username}")
+        print(f"Scanning source channel: {channel_username} (7-day cutoff)")
         
         try:
             async for message in telethon_client.iter_messages(source_entity, limit=None):
+                # Skip messages without text
                 if not message.text:
                     continue
 
+                # STRICT CUTOFF: Break when we reach messages older than 7 days
                 if message.date < cutoff:
+                    print(f"Reached 7-day cutoff in source channel at message {message.id}")
                     break
 
                 source_messages.append({
@@ -1111,34 +1114,42 @@ async def scrape_channel_7days_async(channel_username: str):
                 })
                 source_id_to_text[message.id] = message.text
 
-        except Exception as e:
-            print(f"Error processing channel {channel_username}: {e}")
+            print(f"Found {len(source_messages)} source messages within 7 days")
 
-        # Load forwarded data to get recent source IDs
+        except Exception as e:
+            print(f"Error processing source channel {channel_username}: {e}")
+
+        # Load forwarded data to get recent source IDs - ONLY FROM LAST 7 DAYS
         all_forwarded_data = load_json_from_s3(f"data/{FORWARDED_FILE}")
         if not isinstance(all_forwarded_data, dict):
             all_forwarded_data = {}
         
         channel_forwarded = all_forwarded_data.get(channel_username, {})
         recent_source_ids = set()
+        
         for source_str, ts_str in channel_forwarded.items():
             try:
                 source_id = int(source_str)
-                ts = datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S")
-                if ts >= cutoff.replace(tzinfo=None):
+                ts = datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+                # ONLY include IDs from the last 7 days
+                if ts >= cutoff:
                     recent_source_ids.add(source_id)
-            except:
+            except Exception as e:
+                print(f"Error parsing forwarded data for {source_str}: {e}")
                 continue
         
+        print(f"Found {len(recent_source_ids)} forwarded source IDs within 7 days")
+        
         if not recent_source_ids:
-            print(f"No recent forwarded messages found for {channel_username} in forwarded history.")
+            print(f"No recent forwarded messages found for {channel_username} in the last 7 days.")
             return False, f"No recent forwards found for {channel_username} in the last 7 days."
 
-        # SECOND: Scan target channel STRICTLY in last 7 days using offset_date
-        print(f"Searching for matching messages in target channel (strict 7d scan)...")
+        # SECOND: Scan target channel with STRICT 7-DAY CUTOFF
+        print(f"Searching for matching messages in target channel (STRICT 7-day scan)...")
         
         scraped_data = []
         seen_posts = set()
+        message_count = 0
         
         # Use offset_date=now to start from latest, break on date
         async for message in telethon_client.iter_messages(
@@ -1147,8 +1158,11 @@ async def scrape_channel_7days_async(channel_username: str):
             offset_date=now,  # Start from now
             wait_time=0
         ):
+            message_count += 1
+            
+            # STRICT CUTOFF: Break when we reach messages older than 7 days
             if message.date < cutoff:
-                print(f"Stopped at cutoff via date check.")
+                print(f"Reached 7-day cutoff in target channel after {message_count} messages")
                 break
                 
             if not message.text:
@@ -1214,25 +1228,29 @@ async def scrape_channel_7days_async(channel_username: str):
             }
             scraped_data.append(post_data)
 
-        # Final filter
-        scraped_data = [
-            post for post in scraped_data
-            if datetime.strptime(post["date"], "%Y-%m-%d %H:%M:%S") >= cutoff.replace(tzinfo=None)
-        ]
+        # Final filter - DOUBLE CHECK everything is within 7 days
+        final_scraped_data = []
+        for post in scraped_data:
+            post_date = datetime.strptime(post["date"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+            if post_date >= cutoff:
+                final_scraped_data.append(post)
+            else:
+                print(f"Filtered out post {post['target_message_id']} from {post_date} (older than 7 days)")
 
-        print(f"Found {len(scraped_data)} total messages with AI enhancement from {channel_username}")
+        print(f"Found {len(final_scraped_data)} messages with AI enhancement from {channel_username} (within 7 days)")
         
         # Load existing data DIRECTLY FROM S3 JSON
         existing_data = load_scraped_data_from_s3()
         
         print(f"Loaded existing data with {len(existing_data)} records from S3 JSON")
 
-        if scraped_data:
+        if final_scraped_data:
             # Combine and deduplicate
             combined_data = existing_data.copy()
             existing_refs = {item['product_ref'] for item in existing_data}
             new_items_added = 0
-            for new_item in scraped_data:
+            
+            for new_item in final_scraped_data:
                 if new_item['product_ref'] not in existing_refs:
                     combined_data.append(new_item)
                     new_items_added += 1
@@ -1241,8 +1259,8 @@ async def scrape_channel_7days_async(channel_username: str):
             success = save_scraped_data_to_s3(combined_data)
             if success:
                 print(f"Saved {len(combined_data)} total records to S3 with AI enhancement")
-                track_session_usage("scraping", True, f"Scraped {len(scraped_data)} messages with AI")
-                result_msg = f"Scraped {len(scraped_data)} messages from {channel_username}. Added {new_items_added} new records."
+                track_session_usage("scraping", True, f"Scraped {len(final_scraped_data)} messages with AI")
+                result_msg = f"Scraped {len(final_scraped_data)} messages from {channel_username}. Added {new_items_added} new records."
                 return True, result_msg
             else:
                 track_session_usage("scraping", False, "S3 save failed")
@@ -1274,6 +1292,7 @@ async def scrape_channel_7days_async(channel_username: str):
                     os.remove(USER_SESSION_FILE)
             except Exception as e:
                 print(f"Error during cleanup: {e}")
+
 def scrape_channel_7days_sync(channel_username: str):
     """Synchronous wrapper for 7-day scraping"""
     try:
@@ -1579,7 +1598,7 @@ def unknown_command(update, context):
         "/listchannels\n"
         "/checkchannel @ChannelUsername\n"
         "/deletechannel @ChannelUsername\n"
-        "/setup - Set up Telegram session\n"
+        "/setup v2 - Set up Telegram session\n"
         "/check_session - Check session status\n"
         "/checksessionusage - Session usage stats\n"
         "/test - Test connection\n"
