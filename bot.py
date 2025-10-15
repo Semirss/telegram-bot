@@ -1510,7 +1510,7 @@ def check_s3_status(update, context):
         msg += f"  │   └── {USER_SESSION_FILE}\n"
         msg += f"  └── data/\n"
         msg += f"      ├── {FORWARDED_FILE}\n"
-        msg += f"      └── {scraped_7d}\n"
+        msg += f"      └── {SCRAPED_DATA_FILE}\n"
         
         update.message.reply_text(msg, parse_mode="HTML")
         
