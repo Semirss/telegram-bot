@@ -742,7 +742,7 @@ async def forward_last_7d_async(channel_username: str):
         print(f"📨 Fetching messages from {channel_username}...")
         
         try:
-            async for message in telethon_client.iter_messages(entity, limit=200):
+            async for message in telethon_client.iter_messages(entity, limit=None):
                 message_count += 1
                 if message_count % 10 == 0:
                     print(f"📊 Processed {message_count} messages...")
