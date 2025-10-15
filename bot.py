@@ -1059,7 +1059,7 @@ def check_session_usage(update, context):
 # 7-day scraping function with PURE S3 integration
 # ======================
 async def scrape_channel_7days_async(channel_username: str):
-    """Scrape last 7 days of data and link to forwarded messages in target channel - MATCHING FIRST CODE LOGIC"""
+    """Scrape last 7 days of data and link to forwarded messages in target channel - STRICT 7-DAY CUTOFF, NO HISTORICAL MATCHES"""
     telethon_client = None
     
     try:
@@ -1112,34 +1112,74 @@ async def scrape_channel_7days_async(channel_username: str):
         except Exception as e:
             print(f"Error processing channel {channel_username}: {e}")
 
+        # Load forwarded data to get the mapping of recent source IDs to target IDs
+        all_forwarded_data = load_json_from_s3(f"data/{FORWARDED_FILE}")
+        if not isinstance(all_forwarded_data, dict):
+            all_forwarded_data = {}
+        
+        channel_forwarded = all_forwarded_data.get(channel_username, {})
+        forwarded_source_to_target = {}  # Map source_id -> target_id for recent forwards
+        for source_str, ts_str in channel_forwarded.items():
+            try:
+                source_id = int(source_str)
+                # Parse timestamp to check if recent (optional, but ensures only 7d)
+                ts = datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S")
+                if ts >= cutoff.replace(tzinfo=None):
+                    # We don't have target_id in forwarded.json, so we'll collect expected source IDs only
+                    pass
+            except:
+                continue
+        
+        # Collect recent source IDs that were forwarded in this timeframe
+        recent_source_ids = set()
+        for source_str, ts_str in channel_forwarded.items():
+            try:
+                source_id = int(source_str)
+                ts = datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S")
+                if ts >= cutoff.replace(tzinfo=None):
+                    recent_source_ids.add(source_id)
+            except:
+                continue
+        
+        if not recent_source_ids:
+            print(f"No recent forwarded messages found for {channel_username} in forwarded history.")
+            # Fall back to text matching but with strict limit
+
         # SECOND: Iterate through target channel and match messages
         print(f"Searching for matching messages in target channel...")
         
         scraped_data = []
         seen_posts = set()
         
-        async for message in telethon_client.iter_messages(target_entity, limit=None):
+        # STRICT: Use offset_date to stop exactly at cutoff - Telethon enforces date filter
+        async for message in telethon_client.iter_messages(target_entity, limit=None, offset_date=cutoff + timedelta(seconds=1), wait_time=0):
+            # Additional manual check
+            if message.date < cutoff:
+                print(f"Stopped at cutoff date via offset_date.")
+                break
+                
             if not message.text:
                 continue
-
-            if message.date < cutoff:
-                break
-
+                
             if message.id in seen_posts:
                 continue
             seen_posts.add(message.id)
 
-            # Find matching message from source channels
+            # Find matching source by text
             matching_source = None
             for source_msg in source_messages:
-                # Simple text matching - you might want to make this more robust
                 if (source_msg['text'] in message.text or 
                     message.text in source_msg['text'] or
-                    source_msg['text'][:100] in message.text):  # Match first 100 chars
+                    source_msg['text'][:100] in message.text):
                     matching_source = source_msg
                     break
 
             if not matching_source:
+                continue
+            
+            # STRICT FILTER: Only include if the source_message_id was forwarded recently
+            if recent_source_ids and matching_source['source_message_id'] not in recent_source_ids:
+                print(f"Skipping historical duplicate for source ID {matching_source['source_message_id']}")
                 continue
 
             info = extract_info(message.text, message.id)
@@ -1148,7 +1188,7 @@ async def scrape_channel_7days_async(channel_username: str):
             print(f"AI enriching message {message.id}: {info['title'][:50]}...")
             predicted_category, generated_description = enrich_product_with_ai(info["title"], info["description"])            
             
-            # Build permalink from TARGET channel (where the message actually exists)
+            # Build permalink from TARGET channel
             if getattr(target_entity, "username", None):
                 post_link = f"https://t.me/{target_entity.username}/{message.id}"
             else:
@@ -1180,7 +1220,7 @@ async def scrape_channel_7days_async(channel_username: str):
             }
             scraped_data.append(post_data)
 
-        # Keep only posts newer than cutoff
+        # Final strict filter (redundant but matches original)
         scraped_data = [
             post for post in scraped_data
             if datetime.strptime(post["date"], "%Y-%m-%d %H:%M:%S") >= cutoff.replace(tzinfo=None)
@@ -1194,41 +1234,25 @@ async def scrape_channel_7days_async(channel_username: str):
         print(f"Loaded existing data with {len(existing_data)} records from S3 JSON")
 
         if scraped_data:
-            # Combine and deduplicate by product_ref (now source channel + source message ID)
+            # Combine and deduplicate
             combined_data = existing_data.copy()
-            
-            # Create a set of existing product_refs for quick lookup
             existing_refs = {item['product_ref'] for item in existing_data}
-            
-            # Add new items that don't exist
             new_items_added = 0
             for new_item in scraped_data:
                 if new_item['product_ref'] not in existing_refs:
                     combined_data.append(new_item)
                     new_items_added += 1
             
-            # Save ONLY to S3 as JSON
+            # Save to S3
             success = save_scraped_data_to_s3(combined_data)
             if success:
                 print(f"Saved {len(combined_data)} total records to S3 with AI enhancement")
-                
-                # Print AI enhancement summary
-                from collections import Counter
-                category_counts = Counter(item['predicted_category'] for item in scraped_data)
-                print("AI Enhancement Summary:")
-                for category, count in category_counts.most_common(5):
-                    print(f"  • {category}: {count} products")
-                
                 track_session_usage("scraping", True, f"Scraped {len(scraped_data)} messages with AI")
-                
-                result_msg = f"Scraped {len(scraped_data)} messages from {channel_username}. "
-                result_msg += f"Added {new_items_added} new AI-enhanced records to database. "
-                result_msg += f"(All linked to {FORWARD_CHANNEL})"
-                
+                result_msg = f"Scraped {len(scraped_data)} messages from {channel_username}. Added {new_items_added} new records."
                 return True, result_msg
             else:
                 track_session_usage("scraping", False, "S3 save failed")
-                return False, f"Failed to save AI-enhanced data for {channel_username} to S3."
+                return False, f"Failed to save data for {channel_username} to S3."
         else:
             track_session_usage("scraping", True, "No new messages found")
             return False, f"No messages found for {channel_username} in the last 7 days."
@@ -1244,7 +1268,6 @@ async def scrape_channel_7days_async(channel_username: str):
         if telethon_client:
             try:
                 await telethon_client.disconnect()
-                # Upload session file to S3 after operations
                 print("Uploading updated session file to S3...")
                 if os.path.exists(USER_SESSION_FILE):
                     with open(USER_SESSION_FILE, 'rb') as f:
@@ -1254,7 +1277,6 @@ async def scrape_channel_7days_async(channel_username: str):
                             Body=f.read()
                         )
                     print(f"Session file uploaded to S3: {USER_SESSION_FILE}")
-                    # Clean up temporary file
                     os.remove(USER_SESSION_FILE)
             except Exception as e:
                 print(f"Error during cleanup: {e}")
