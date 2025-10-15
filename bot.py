@@ -1189,49 +1189,41 @@ async def scrape_channel_7days_async(channel_username: str):
         print(f"📋 Found {len(scraped_data)} total messages with AI enhancement from {channel_username}")
         print(f"📊 Statistics: {len(source_messages)} source messages, {len(scraped_data)} matched in target channel")
         
-            # Load existing data DIRECTLY FROM S3 JSON
+        # Load existing data DIRECTLY FROM S3 JSON
         existing_data = load_scraped_data_from_s3()
-                
-        print(f"📁 Loaded existing data with {len(existing_data)} records from S3 JSON")
-
-        if scraped_data:
-                        # Combine and deduplicate by product_ref (which is now target message ID)
-                        combined_data = existing_data.copy()
-            # Load existing data DIRECTLY FROM S3 JSON
-        existing_data = load_scraped_data_from_s3()
-
+        
         print(f"📁 Loaded existing data with {len(existing_data)} records from S3 JSON")
 
         if scraped_data:
             # Combine and deduplicate by product_ref (which is now target message ID)
             combined_data = existing_data.copy()
-
+            
             # Create a set of existing product_refs for quick lookup
             existing_refs = {item['product_ref'] for item in existing_data}
-
+            
             # Add new items that don't exist
             new_items_added = 0
             for new_item in scraped_data:
                 if new_item['product_ref'] not in existing_refs:
                     combined_data.append(new_item)
                     new_items_added += 1
-
-                        # Save ONLY to S3 as JSON
-            success = save_scraped_data_to_ss(combined_data)
+            
+            # Save ONLY to S3 as JSON
+            success = save_scraped_data_to_s3(combined_data)
             if success:
-                print(f"💾 Saved {len(combined_df)} total records to S3 with AI enhancement")
+                print(f"💾 Saved {len(combined_data)} total records to S3 with AI enhancement")
                 
                 # Print AI enhancement summary
-                category_counts = new_df['predicted_category'].value_counts()
+                from collections import Counter
+                category_counts = Counter(item['predicted_category'] for item in scraped_data)
                 print("🤖 AI Enhancement Summary:")
-                for category, count in category_counts.head(5).items():
+                for category, count in category_counts.most_common(5):
                     print(f"  • {category}: {count} products")
                 
-                new_count = len(combined_df) - len(existing_df)
                 track_session_usage("scraping", True, f"Scraped {len(scraped_data)} messages with AI")
                 
                 result_msg = f"✅ Scraped {len(scraped_data)} messages from {channel_username}. "
-                result_msg += f"Added {new_count} new AI-enhanced records to database. "
+                result_msg += f"Added {new_items_added} new AI-enhanced records to database. "
                 result_msg += f"(All linked to {FORWARD_CHANNEL})"
                 
                 return True, result_msg
