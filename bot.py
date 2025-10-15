@@ -1475,7 +1475,54 @@ def delete_channel(update, context):
         update.message.reply_text(f"✅ Channel {username} has been deleted from the database.")
     else:
         update.message.reply_text(f"⚠️ Channel {username} was not found in the database.")
-
+@authorized
+def delete_s3_files(update, context):
+    """Delete the scraped_data.json and forwarded_messages.json files from S3"""
+    try:
+        deleted_files = []
+        errors = []
+        
+        # List of files to delete
+        files_to_delete = [
+            f"data/{SCRAPED_DATA_FILE}",  # scraped_data.json
+            f"data/{FORWARDED_FILE}"      # forwarded_messages.json
+        ]
+        
+        for s3_key in files_to_delete:
+            try:
+                # Check if exists before deleting
+                if file_exists_in_s3(s3_key):
+                    s3.delete_object(Bucket=AWS_BUCKET_NAME, Key=s3_key)
+                    deleted_files.append(s3_key)
+                    print(f"Deleted {s3_key} from S3")
+                else:
+                    errors.append(f"{s3_key} not found in S3")
+            except Exception as e:
+                errors.append(f"Error deleting {s3_key}: {str(e)}")
+        
+        # Prepare response
+        msg = f"<b>S3 File Deletion Report</b>\n\n"
+        if deleted_files:
+            msg += f"<b>Deleted:</b>\n"
+            for f in deleted_files:
+                msg += f"• {f}\n"
+        if errors:
+            msg += f"\n<b>Issues:</b>\n"
+            for e in errors:
+                msg += f"• {e}\n"
+        
+        if not deleted_files and not errors:
+            msg += "No files were targeted or found."
+        
+        update.message.reply_text(msg, parse_mode="HTML")
+        
+        track_session_usage("delete_s3_files", True if deleted_files else False, f"Deleted: {len(deleted_files)}, Errors: {len(errors)}")
+        
+    except Exception as e:
+        error_msg = f"Unexpected error during deletion: {str(e)}"
+        update.message.reply_text(f"Failed: {error_msg}")
+        print(error_msg)
+        track_session_usage("delete_s3_files", False, error_msg)
 @authorized
 def check_s3_status(update, context):
     """Check S3 bucket and file status efficiently"""
@@ -1533,8 +1580,9 @@ def unknown_command(update, context):
         "/diagnose - Diagnose session health\n"
         "/debug_json - Debug a json file in S3\n"
         "/test_s3_write - Test S3 write access\n"
-        "/debug_json_comprehensive - Comprehensive json debug"
-        "/getscrapedjson - get json file"
+        "/debug_json_comprehensive - Comprehensive json debug\n"
+        "/getscrapedjson - get json file\n"
+        "//deletes3files - Delete S3 files\n"
     )
 
 @authorized
@@ -1755,6 +1803,7 @@ def main():
     dp.add_handler(CommandHandler("clearhistory", clear_forwarded_history))
     dp.add_handler(CommandHandler("diagnose", diagnose_session))
     dp.add_handler(CommandHandler("debug_json", debug_s3_json))
+    dp.add_handler(CommandHandler("deletes3files", delete_s3_files))
     dp.add_handler(CommandHandler("getscrapedjson", get_scraped_json))
     dp.add_handler(CommandHandler("debug_json_comprehensive", debug_json_comprehensive))
     dp.add_handler(MessageHandler(Filters.command, unknown_command))
