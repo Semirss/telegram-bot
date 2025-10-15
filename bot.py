@@ -1059,7 +1059,7 @@ def check_session_usage(update, context):
 # 7-day scraping function with PURE S3 integration
 # ======================
 async def scrape_channel_7days_async(channel_username: str):
-    """Scrape last 7 days of data and link to forwarded messages in target channel - STRICT 7-DAY CUTOFF, NO HISTORICAL MATCHES"""
+    """Scrape last 7 days of data and link to forwarded messages in target channel - STRICT 7-DAY CUTOFF, USE FORWARDED IDS TO MAP TARGET MESSAGES"""
     telethon_client = None
     
     try:
@@ -1089,8 +1089,9 @@ async def scrape_channel_7days_async(channel_username: str):
         cutoff = now - timedelta(days=7)
         print(f"Scraping messages from last 7 days (since {cutoff})")
 
-        # FIRST: Collect all message texts from source channels to search for in target channel
+        # FIRST: Collect recent source messages (texts and IDs)
         source_messages = []
+        source_id_to_text = {}
         
         print(f"Scanning channel: {channel_username}")
         
@@ -1108,29 +1109,17 @@ async def scrape_channel_7days_async(channel_username: str):
                     'source_channel': channel_username,
                     'source_message_id': message.id
                 })
+                source_id_to_text[message.id] = message.text
 
         except Exception as e:
             print(f"Error processing channel {channel_username}: {e}")
 
-        # Load forwarded data to get the mapping of recent source IDs to target IDs
+        # Load forwarded data to get recent source IDs
         all_forwarded_data = load_json_from_s3(f"data/{FORWARDED_FILE}")
         if not isinstance(all_forwarded_data, dict):
             all_forwarded_data = {}
         
         channel_forwarded = all_forwarded_data.get(channel_username, {})
-        forwarded_source_to_target = {}  # Map source_id -> target_id for recent forwards
-        for source_str, ts_str in channel_forwarded.items():
-            try:
-                source_id = int(source_str)
-                # Parse timestamp to check if recent (optional, but ensures only 7d)
-                ts = datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S")
-                if ts >= cutoff.replace(tzinfo=None):
-                    # We don't have target_id in forwarded.json, so we'll collect expected source IDs only
-                    pass
-            except:
-                continue
-        
-        # Collect recent source IDs that were forwarded in this timeframe
         recent_source_ids = set()
         for source_str, ts_str in channel_forwarded.items():
             try:
@@ -1143,19 +1132,23 @@ async def scrape_channel_7days_async(channel_username: str):
         
         if not recent_source_ids:
             print(f"No recent forwarded messages found for {channel_username} in forwarded history.")
-            # Fall back to text matching but with strict limit
+            return False, f"No recent forwards found for {channel_username} in the last 7 days."
 
-        # SECOND: Iterate through target channel and match messages
-        print(f"Searching for matching messages in target channel...")
+        # SECOND: Scan target channel STRICTLY in last 7 days using offset_date
+        print(f"Searching for matching messages in target channel (strict 7d scan)...")
         
         scraped_data = []
         seen_posts = set()
         
-        # STRICT: Use offset_date to stop exactly at cutoff - Telethon enforces date filter
-        async for message in telethon_client.iter_messages(target_entity, limit=None, offset_date=cutoff + timedelta(seconds=1), wait_time=0):
-            # Additional manual check
+        # Use offset_date=now to start from latest, break on date
+        async for message in telethon_client.iter_messages(
+            target_entity, 
+            limit=None, 
+            offset_date=now,  # Start from now
+            wait_time=0
+        ):
             if message.date < cutoff:
-                print(f"Stopped at cutoff date via offset_date.")
+                print(f"Stopped at cutoff via date check.")
                 break
                 
             if not message.text:
@@ -1165,21 +1158,22 @@ async def scrape_channel_7days_async(channel_username: str):
                 continue
             seen_posts.add(message.id)
 
-            # Find matching source by text
-            matching_source = None
-            for source_msg in source_messages:
-                if (source_msg['text'] in message.text or 
-                    message.text in source_msg['text'] or
-                    source_msg['text'][:100] in message.text):
-                    matching_source = source_msg
+            # Extract potential source ID from forward info
+            matched_source_id = None
+            matched_source_text = None
+            
+            # Primary: Text match to confirm and get source ID
+            for src_id, src_text in source_id_to_text.items():
+                if src_id in recent_source_ids and (
+                    src_text in message.text or 
+                    message.text in src_text or 
+                    src_text[:100] in message.text
+                ):
+                    matched_source_id = src_id
+                    matched_source_text = src_text
                     break
 
-            if not matching_source:
-                continue
-            
-            # STRICT FILTER: Only include if the source_message_id was forwarded recently
-            if recent_source_ids and matching_source['source_message_id'] not in recent_source_ids:
-                print(f"Skipping historical duplicate for source ID {matching_source['source_message_id']}")
+            if not matched_source_id:
                 continue
 
             info = extract_info(message.text, message.id)
@@ -1197,7 +1191,7 @@ async def scrape_channel_7days_async(channel_username: str):
                     internal_id = internal_id[4:]
                 post_link = f"https://t.me/c/{internal_id}/{message.id}"
 
-            product_ref = f"{channel_username}_{matching_source['source_message_id']}"
+            product_ref = f"{channel_username}_{matched_source_id}"
 
             post_data = {
                 "title": info["title"],
@@ -1215,12 +1209,12 @@ async def scrape_channel_7days_async(channel_username: str):
                 "ai_enhanced": True,
                 "has_media": bool(message.media),
                 "has_text": bool(message.text),
-                "source_message_id": matching_source['source_message_id'],
+                "source_message_id": matched_source_id,
                 "target_message_id": message.id
             }
             scraped_data.append(post_data)
 
-        # Final strict filter (redundant but matches original)
+        # Final filter
         scraped_data = [
             post for post in scraped_data
             if datetime.strptime(post["date"], "%Y-%m-%d %H:%M:%S") >= cutoff.replace(tzinfo=None)
