@@ -1576,7 +1576,7 @@ def unknown_command(update, context):
         "/test_s3_write - Test S3 write access\n"
         "/debug_json_comprehensive - Comprehensive json debug\n"
         "/getscrapedjson - get json file\n"
-        "//deletes3files - Delete S3 files\n"
+        "/deletes3files - Delete S3 files\n"
     )
 
 @authorized
