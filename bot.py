@@ -346,7 +346,7 @@ def check_s3_files_status():
     files_to_check = {
         "Session File": f"sessions/{USER_SESSION_FILE}",
         "Forwarded Messages": f"data/{FORWARDED_FILE}",
-        "Scraped Data": f"data/{scraped_7d}"
+        "Scraped Data": f"data/{SCRAPED_DATA_FILE}"
     }
     
     results = {}
@@ -357,7 +357,6 @@ def check_s3_files_status():
         print(f"{status} {file_type}: {s3_key}")
     
     return results
-
 # JSON data functions - DIRECT S3 access (no local files)
 def load_json_from_s3(s3_key):
     """Load JSON data directly from S3 without downloading files"""
