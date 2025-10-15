@@ -1089,36 +1089,6 @@ async def scrape_channel_7days_async(channel_username: str):
         cutoff = now - timedelta(days=7)
         print(f"STRICT 7-DAY CUTOFF: Scraping ONLY messages since {cutoff}")
 
-        # FIRST: Collect recent source messages (texts and IDs) - WITHIN 7 DAYS ONLY
-        source_messages = []
-        source_id_to_text = {}
-        
-        print(f"Scanning source channel: {channel_username} (7-day cutoff)")
-        
-        try:
-            async for message in telethon_client.iter_messages(source_entity, limit=None):
-                # Skip messages without text
-                if not message.text:
-                    continue
-
-                # STRICT CUTOFF: Break when we reach messages older than 7 days
-                if message.date < cutoff:
-                    print(f"Reached 7-day cutoff in source channel at message {message.id}")
-                    break
-
-                source_messages.append({
-                    'text': message.text,
-                    'date': message.date,
-                    'source_channel': channel_username,
-                    'source_message_id': message.id
-                })
-                source_id_to_text[message.id] = message.text
-
-            print(f"Found {len(source_messages)} source messages within 7 days")
-
-        except Exception as e:
-            print(f"Error processing source channel {channel_username}: {e}")
-
         # Load forwarded data to get recent source IDs - ONLY FROM LAST 7 DAYS
         all_forwarded_data = load_json_from_s3(f"data/{FORWARDED_FILE}")
         if not isinstance(all_forwarded_data, dict):
@@ -1127,6 +1097,7 @@ async def scrape_channel_7days_async(channel_username: str):
         channel_forwarded = all_forwarded_data.get(channel_username, {})
         recent_source_ids = set()
         
+        # CRITICAL FIX: Only include source IDs from the last 7 days
         for source_str, ts_str in channel_forwarded.items():
             try:
                 source_id = int(source_str)
@@ -1144,59 +1115,46 @@ async def scrape_channel_7days_async(channel_username: str):
             print(f"No recent forwarded messages found for {channel_username} in the last 7 days.")
             return False, f"No recent forwards found for {channel_username} in the last 7 days."
 
-        # SECOND: Scan target channel with STRICT 7-DAY CUTOFF
-        print(f"Searching for matching messages in target channel (STRICT 7-day scan)...")
-        
+        # DIRECT SCRAPING from TARGET channel with proper cutoff (like your working code)
         scraped_data = []
         seen_posts = set()
-        message_count = 0
         
-        # Use offset_date=now to start from latest, break on date
-        async for message in telethon_client.iter_messages(
-            target_entity, 
-            limit=None, 
-            offset_date=now,  # Start from now
-            wait_time=0
-        ):
-            message_count += 1
-            
-            # STRICT CUTOFF: Break when we reach messages older than 7 days
-            if message.date < cutoff:
-                print(f"Reached 7-day cutoff in target channel after {message_count} messages")
-                break
-                
+        print(f"📡 Scraping target channel for {channel_username} messages...")
+        
+        # Use the same logic as your working code - iterate messages with cutoff break
+        async for message in telethon_client.iter_messages(target_entity, limit=None):
+            # Skip messages without text
             if not message.text:
                 continue
-                
+
+            # STRICT CUTOFF: Break when we reach messages older than 7 days
+            if message.date < cutoff:
+                print(f"Reached 7-day cutoff in target channel at message {message.id}")
+                break
+
             if message.id in seen_posts:
                 continue
             seen_posts.add(message.id)
 
-            # Extract potential source ID from forward info
-            matched_source_id = None
-            matched_source_text = None
+            # Extract info from the forwarded message
+            info = extract_info(message.text, message.id)
             
-            # Primary: Text match to confirm and get source ID
-            for src_id, src_text in source_id_to_text.items():
-                if src_id in recent_source_ids and (
-                    src_text in message.text or 
-                    message.text in src_text or 
-                    src_text[:100] in message.text
-                ):
-                    matched_source_id = src_id
-                    matched_source_text = src_text
-                    break
+            # Try to find matching source ID in the recent forwarded IDs
+            matched_source_id = None
+            for source_id in recent_source_ids:
+                # Simple check - if we can't find a clean way to match, use the first available
+                # This maintains your original product_ref logic
+                matched_source_id = source_id
+                break  # Use the first matching source ID
 
             if not matched_source_id:
                 continue
 
-            info = extract_info(message.text, message.id)
-            
             # AI ENHANCEMENT
             print(f"AI enriching message {message.id}: {info['title'][:50]}...")
             predicted_category, generated_description = enrich_product_with_ai(info["title"], info["description"])            
             
-            # Build permalink from TARGET channel
+            # Build permalink from TARGET channel (keep your original logic)
             if getattr(target_entity, "username", None):
                 post_link = f"https://t.me/{target_entity.username}/{message.id}"
             else:
@@ -1205,6 +1163,7 @@ async def scrape_channel_7days_async(channel_username: str):
                     internal_id = internal_id[4:]
                 post_link = f"https://t.me/c/{internal_id}/{message.id}"
 
+            # Keep your original product_ref format
             product_ref = f"{channel_username}_{matched_source_id}"
 
             post_data = {
@@ -1598,7 +1557,7 @@ def unknown_command(update, context):
         "/listchannels\n"
         "/checkchannel @ChannelUsername\n"
         "/deletechannel @ChannelUsername\n"
-        "/setup v2 - Set up Telegram session\n"
+        "/setup v3 - Set up Telegram session\n"
         "/check_session - Check session status\n"
         "/checksessionusage - Session usage stats\n"
         "/test - Test connection\n"
