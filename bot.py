@@ -1056,10 +1056,10 @@ def check_session_usage(update, context):
     except Exception as e:
         update.message.reply_text(f"❌ Error checking session usage: {e}")
 # ======================
-# 7-day scraping function with PURE S3 integration
+# Simplified 7-day scraping function
 # ======================
 async def scrape_channel_7days_async(channel_username: str):
-    """Scrape last 7 days of data and link to forwarded messages in target channel - MATCHING FIRST CODE LOGIC"""
+    """Simple scrape of last 7 days of data from channel"""
     telethon_client = None
     
     try:
@@ -1070,16 +1070,12 @@ async def scrape_channel_7days_async(channel_username: str):
             track_session_usage("scraping", False, "Failed to initialize client")
             return False, "❌ Could not establish connection for scraping."
         
-        print(f"🔍 Starting 7-day scrape with AI enrichment for channel: {channel_username}")
+        print(f"🔍 Starting 7-day scrape for channel: {channel_username}")
         
         try:
-            # Get the SOURCE channel entity (where we scrape FROM)
-            source_entity = await telethon_client.get_entity(channel_username)
-            print(f"✅ Source channel found: {source_entity.title}")
-            
-            # Get the TARGET channel entity (where messages are forwarded TO)
-            target_entity = await telethon_client.get_entity(FORWARD_CHANNEL)
-            print(f"✅ Target channel found: {target_entity.title}")
+            # Get the channel entity
+            entity = await telethon_client.get_entity(channel_username)
+            print(f"✅ Channel found: {entity.title}")
             
         except (ChannelInvalidError, UsernameInvalidError, UsernameNotOccupiedError) as e:
             track_session_usage("scraping", False, f"Invalid channel: {str(e)}")
@@ -1089,88 +1085,47 @@ async def scrape_channel_7days_async(channel_username: str):
         cutoff = now - timedelta(days=7)
         print(f"⏰ Scraping ALL messages from last 7 days (since {cutoff})")
 
-        # First, collect source messages
-        source_messages = []
+        # Simple scraping logic
+        scraped_data = []
+        seen_posts = set()
         message_count = 0
         
-        print(f"📡 Collecting messages from source channel: {channel_username}")
+        print(f"📡 Collecting messages from channel: {channel_username}")
         
-        async for message in telethon_client.iter_messages(source_entity, limit=None):
+        async for message in telethon_client.iter_messages(entity, limit=None):
             message_count += 1
             if message_count % 20 == 0:
-                print(f"📊 Scanned {message_count} source messages... Found {len(source_messages)} valid messages")
+                print(f"📊 Scanned {message_count} messages... Found {len(scraped_data)} valid messages")
                 
             if message.date < cutoff:
-                print(f"⏹️ Reached 7-day cutoff. Scanned {message_count} total messages, found {len(source_messages)} valid messages in last 7 days")
+                print(f"⏹️ Reached 7-day cutoff. Scanned {message_count} total messages, found {len(scraped_data)} valid messages")
                 break
                 
             # Skip messages without text
             if not message.text:
                 continue
 
-            source_messages.append({
-                'text': message.text,
-                'date': message.date,
-                'source_channel': channel_username,
-                'source_message_id': message.id
-            })
-
-        # Now scan TARGET channel to find matching forwarded messages
-        scraped_data = []
-        target_messages_count = 0
-        seen_posts = set()
-        
-        print(f"🔍 Searching for matching messages in target channel {FORWARD_CHANNEL}...")
-        
-        # 🔴 FIXED: Scan TARGET entity, not source entity
-        async for target_message in telethon_client.iter_messages(target_entity, limit=None):
-            target_messages_count += 1
-            if target_messages_count % 20 == 0:
-                print(f"📊 Scanned {target_messages_count} target messages... Found {len(scraped_data)} matches")
-           
-            # 🔴 FIXED: Use target_message.date, not source_messages.date
-            if target_message.date < cutoff:
-                print(f"⏹️ Reached 7-day cutoff in target channel. Scanned {target_messages_count} total messages")
-                break
-                
-            # 🔴 FIXED: Use target_message.text, not source_messages.text
-            if not target_message.text:
+            if message.id in seen_posts:
                 continue
-                
-            # 🔴 FIXED: Use target_message.id, not source_messages.id
-            if target_message.id in seen_posts:
-                continue
-            seen_posts.add(target_message.id)
+            seen_posts.add(message.id)
 
-            # Find matching source message by text content
-            matching_source = None
-            for source_msg in source_messages:
-                if (source_msg['text'] in target_message.text or 
-                    target_message.text in source_msg['text'] or
-                    source_msg['text'][:100] in target_message.text):
-                    matching_source = source_msg
-                    break
-
-            if not matching_source:
-                continue
-
-            # Extract info from TARGET message text
-            info = extract_info(target_message.text, target_message.id)
+            # Extract info from message text
+            info = extract_info(message.text, message.id)
             
             # AI ENHANCEMENT
-            print(f"🤖 AI enriching message {target_message.id}: {info['title'][:50]}...")
+            print(f"🤖 AI enriching message {message.id}: {info['title'][:50]}...")
             predicted_category, generated_description = enrich_product_with_ai(info["title"], info["description"])            
             
-            # 🔥 CORRECTED: Use TARGET channel entity and TARGET message ID for post_link
-            if getattr(target_entity, "username", None):
-                post_link = f"https://t.me/{target_entity.username}/{target_message.id}"
+            # Create post link
+            if getattr(entity, "username", None):
+                post_link = f"https://t.me/{entity.username}/{message.id}"
             else:
-                internal_id = str(target_entity.id)
+                internal_id = str(entity.id)
                 if internal_id.startswith("-100"):
                     internal_id = internal_id[4:]
-                post_link = f"https://t.me/c/{internal_id}/{target_message.id}"
+                post_link = f"https://t.me/c/{internal_id}/{message.id}"
 
-            product_ref = str(target_message.id)
+            product_ref = str(message.id)
 
             # Create data structure
             post_data = {
@@ -1179,23 +1134,22 @@ async def scrape_channel_7days_async(channel_username: str):
                 "price": info["price"],
                 "phone": info["phone"],
                 "location": info["location"],
-                "date": target_message.date.strftime("%Y-%m-%d %H:%M:%S"),
-                "channel": channel_username,  # Keep source channel name
-                "post_link": post_link,       # Link to target channel
-                "product_ref": product_ref,   # ID in target channel
+                "date": message.date.strftime("%Y-%m-%d %H:%M:%S"),
+                "channel": channel_username,
+                "post_link": post_link,
+                "product_ref": product_ref,
                 "scraped_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "predicted_category": predicted_category,
                 "generated_description": generated_description,
                 "ai_enhanced": True,
-                "has_media": bool(target_message.media),
-                "has_text": bool(target_message.text),
-                "source_message_id": matching_source['source_message_id'],  # Original source ID
-                "target_message_id": target_message.id   # Target channel ID
+                "has_media": bool(message.media),
+                "has_text": bool(message.text),
+                "source_message_id": message.id,
+                "target_message_id": message.id
             }
             scraped_data.append(post_data)
         
         print(f"📋 Found {len(scraped_data)} total messages with AI enhancement from {channel_username}")
-        print(f"📊 Statistics: {len(source_messages)} source messages, {len(scraped_data)} matched in target channel")
         
         # Load existing data DIRECTLY FROM S3 JSON
         existing_data = load_scraped_data_from_s3()
@@ -1203,7 +1157,7 @@ async def scrape_channel_7days_async(channel_username: str):
         print(f"📁 Loaded existing data with {len(existing_data)} records from S3 JSON")
 
         if scraped_data:
-            # Combine and deduplicate by product_ref (which is now target message ID)
+            # Combine and deduplicate by product_ref
             combined_data = existing_data.copy()
             
             # Create a set of existing product_refs for quick lookup
@@ -1231,8 +1185,7 @@ async def scrape_channel_7days_async(channel_username: str):
                 track_session_usage("scraping", True, f"Scraped {len(scraped_data)} messages with AI")
                 
                 result_msg = f"✅ Scraped {len(scraped_data)} messages from {channel_username}. "
-                result_msg += f"Added {new_items_added} new AI-enhanced records to database. "
-                result_msg += f"(All linked to {FORWARD_CHANNEL})"
+                result_msg += f"Added {new_items_added} new AI-enhanced records to database."
                 
                 return True, result_msg
             else:
@@ -1573,7 +1526,7 @@ def unknown_command(update, context):
         "/listchannels\n"
         "/checkchannel @ChannelUsername\n"
         "/deletechannel @ChannelUsername\n"
-        "/setup v5 - Set up Telegram session\n"
+        "/setup v6 - Set up Telegram session\n"
         "/check_session - Check session status\n"
         "/checksessionusage - Session usage stats\n"
         "/test - Test connection\n"
