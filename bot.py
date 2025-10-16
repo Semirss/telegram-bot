@@ -721,9 +721,9 @@ async def forward_last_7d_async(channel_username: str):
 
         now = datetime.now(timezone.utc)
         cutoff = now - timedelta(days=7)
-        print(f"⏰ Forwarding messages since: {cutoff}")
+        print(f"⏰ Forwarding messages from last 7 days (since {cutoff})")
 
-        # Load previously forwarded messages with timestamps - DIRECT FROM S3
+        # Load previously forwarded messages - DIRECT FROM S3
         all_forwarded_data = load_json_from_s3(f"data/{FORWARDED_FILE}")
         if not isinstance(all_forwarded_data, dict):
             all_forwarded_data = {}
@@ -731,54 +731,54 @@ async def forward_last_7d_async(channel_username: str):
         # Get or initialize for this channel
         channel_forwarded = all_forwarded_data.get(channel_username, {})
         
-        forwarded_ids = {
-            int(msg_id): datetime.strptime(ts, "%Y-%m-%d %H:%M:%S") 
-            for msg_id, ts in channel_forwarded.items()
-        } if channel_forwarded else {}
-
-        # Remove forwarded IDs older than 7 days
-        week_cutoff = now - timedelta(days=7)
-        forwarded_ids = {msg_id: ts for msg_id, ts in forwarded_ids.items() 
-                         if ts >= week_cutoff.replace(tzinfo=None)}
+        # Simple set of already forwarded message IDs
+        forwarded_ids = set(int(msg_id) for msg_id in channel_forwarded.keys())
 
         messages_to_forward = []
         message_count = 0
+        new_messages_found = 0
         
         print(f"📨 Fetching messages from {channel_username}...")
         
         try:
             async for message in telethon_client.iter_messages(entity, limit=None):
                 message_count += 1
-                if message_count % 10 == 0:
-                    print(f"📊 Processed {message_count} messages...")
-                    
+                if message_count % 20 == 0:
+                    print(f"📊 Scanned {message_count} messages... Found {new_messages_found} new to forward")
+                
+                # Stop when we reach messages older than 7 days
                 if message.date < cutoff:
-                    print(f"⏹️ Reached cutoff time at message {message_count}")
+                    print(f"⏹️ Reached 7-day cutoff. Scanned {message_count} messages, found {new_messages_found} new to forward")
                     break
+                
+                # Skip if already forwarded or has no content
+                if message.id in forwarded_ids:
+                    continue
                     
-                # Check if message is already forwarded and has content
-                if message.id not in forwarded_ids and (message.text or message.media):
-                    messages_to_forward.append(message)
-                    print(f"✅ Added message {message.id} from {message.date}")
+                if not message.text and not message.media:
+                    continue
+                
+                messages_to_forward.append(message)
+                new_messages_found += 1
 
         except Exception as e:
             print(f"⚠️ Error fetching messages: {e}")
 
-        print(f"📋 Found {len(messages_to_forward)} new messages to forward")
+        print(f"📋 Found {len(messages_to_forward)} new messages to forward from last 7 days")
 
         if not messages_to_forward:
             track_session_usage("forwarding", True, "No new messages to forward")
-            return False, f"📭 No new posts found in the last 7d from {channel_username}."
+            return False, f"📭 No new posts found in the last 7 days from {channel_username}."
 
-        # Reverse to forward in chronological order
+        # Forward in chronological order (oldest first)
         messages_to_forward.reverse()
         total_forwarded = 0
         
         print(f"➡️ Forwarding {len(messages_to_forward)} messages from {channel_username}...")
         
-        # Forward in batches of 10 to avoid rate limits
-        for i in range(0, len(messages_to_forward), 10):
-            batch = messages_to_forward[i:i+10]
+        # Forward in batches of 5 to avoid rate limits
+        for i in range(0, len(messages_to_forward), 5):
+            batch = messages_to_forward[i:i+5]
             try:
                 await asyncio.wait_for(
                     telethon_client.forward_messages(
@@ -791,11 +791,11 @@ async def forward_last_7d_async(channel_username: str):
                 
                 # Update forwarded IDs
                 for msg in batch:
-                    forwarded_ids[msg.id] = msg.date.replace(tzinfo=None)
+                    forwarded_ids.add(msg.id)
                     total_forwarded += 1
                 
-                print(f"✅ Forwarded batch {i//10 + 1}/{(len(messages_to_forward)-1)//10 + 1} ({len(batch)} messages)")
-                await asyncio.sleep(1)
+                print(f"✅ Forwarded batch {i//5 + 1}/{(len(messages_to_forward)-1)//5 + 1} ({len(batch)} messages)")
+                await asyncio.sleep(2)  # Longer delay between batches
                 
             except ChatForwardsRestrictedError:
                 print(f"🚫 Forwarding restricted for channel {channel_username}, skipping...")
@@ -814,15 +814,16 @@ async def forward_last_7d_async(channel_username: str):
                 print(f"⚠️ Unexpected error forwarding from {channel_username}: {e}")
                 continue
 
-        # Update channel data and save entire structure DIRECTLY TO S3
+        # Update channel data and save DIRECTLY TO S3
         all_forwarded_data[channel_username] = {
-            str(k): v.strftime("%Y-%m-%d %H:%M:%S") for k, v in forwarded_ids.items()
+            str(msg_id): datetime.now().strftime("%Y-%m-%d %H:%M:%S") 
+            for msg_id in forwarded_ids
         }
         save_json_to_s3(all_forwarded_data, f"data/{FORWARDED_FILE}")
 
         if total_forwarded > 0:
             track_session_usage("forwarding", True, f"Forwarded {total_forwarded} messages")
-            return True, f"✅ Successfully forwarded {total_forwarded} new posts from {channel_username}."
+            return True, f"✅ Successfully forwarded {total_forwarded} new posts from {channel_username} in the last 7 days."
         else:
             track_session_usage("forwarding", False, "No messages forwarded")
             return False, f"📭 No new posts to forward from {channel_username}."
@@ -1089,47 +1090,79 @@ async def scrape_channel_7days_async(channel_username: str):
         cutoff = now - timedelta(days=7)
         print(f"⏰ Scraping ALL messages from last 7 days (since {cutoff})")
 
-        # Simple scraping logic
-        scraped_data = []
-        seen_posts = set()
+        # First, collect source messages
+        source_messages = []
         message_count = 0
         
-        print(f"📡 Collecting messages from channel: {channel_username}")
+        print(f"📡 Collecting messages from source channel: {channel_username}")
         
         async for message in telethon_client.iter_messages(source_entity, limit=None):
             message_count += 1
             if message_count % 20 == 0:
-                print(f"📊 Scanned {message_count} messages... Found {len(scraped_data)} valid messages")
+                print(f"📊 Scanned {message_count} source messages... Found {len(source_messages)} valid messages")
                 
             if message.date < cutoff:
-                print(f"⏹️ Reached 7-day cutoff. Scanned {message_count} total messages, found {len(scraped_data)} valid messages")
+                print(f"⏹️ Reached 7-day cutoff. Scanned {message_count} total messages, found {len(source_messages)} valid messages in last 7 days")
                 break
                 
             # Skip messages without text
             if not message.text:
                 continue
 
-            if message.id in seen_posts:
-                continue
-            seen_posts.add(message.id)
+            source_messages.append({
+                'text': message.text,
+                'date': message.date,
+                'source_channel': channel_username,
+                'source_message_id': message.id
+            })
 
-            # Extract info from message text
-            info = extract_info(message.text, message.id)
+        # Now scan TARGET channel to find actual forwarded messages
+        scraped_data = []
+        target_message_count = 0
+        
+        print(f"🔍 Searching for matching forwarded messages in target channel {FORWARD_CHANNEL}...")
+        
+        async for target_message in telethon_client.iter_messages(target_entity, limit=None):
+            target_message_count += 1
+            if target_message_count % 20 == 0:
+                print(f"📊 Scanned {target_message_count} target messages... Found {len(scraped_data)} matches")
+                
+            if target_message.date < cutoff:
+                print(f"⏹️ Reached 7-day cutoff in target channel. Scanned {target_message_count} total messages")
+                break
+                
+            if not target_message.text:
+                continue
+
+            # Find matching source message by text content
+            matching_source = None
+            for source_msg in source_messages:
+                if (source_msg['text'] in target_message.text or 
+                    target_message.text in source_msg['text'] or
+                    source_msg['text'][:100] in target_message.text):
+                    matching_source = source_msg
+                    break
+
+            if not matching_source:
+                continue
+
+            # Extract info from TARGET message text
+            info = extract_info(target_message.text, target_message.id)
             
             # AI ENHANCEMENT
-            print(f"🤖 AI enriching message {message.id}: {info['title'][:50]}...")
+            print(f"🤖 AI enriching message {target_message.id}: {info['title'][:50]}...")
             predicted_category, generated_description = enrich_product_with_ai(info["title"], info["description"])            
             
-            # 🔥 Use TARGET channel for post_link and product_ref
+            # 🔥 Use TARGET channel entity and ACTUAL TARGET message ID for post_link
             if getattr(target_entity, "username", None):
-                post_link = f"https://t.me/{target_entity.username}/{message.id}"
+                post_link = f"https://t.me/{target_entity.username}/{target_message.id}"
             else:
                 internal_id = str(target_entity.id)
                 if internal_id.startswith("-100"):
                     internal_id = internal_id[4:]
-                post_link = f"https://t.me/c/{internal_id}/{message.id}"
+                post_link = f"https://t.me/c/{internal_id}/{target_message.id}"
 
-            product_ref = str(message.id)  # This ID will be from target channel
+            product_ref = str(target_message.id)  # Use actual target message ID
 
             # Create data structure
             post_data = {
@@ -1138,7 +1171,7 @@ async def scrape_channel_7days_async(channel_username: str):
                 "price": info["price"],
                 "phone": info["phone"],
                 "location": info["location"],
-                "date": message.date.strftime("%Y-%m-%d %H:%M:%S"),
+                "date": target_message.date.strftime("%Y-%m-%d %H:%M:%S"),
                 "channel": channel_username,  # Keep source channel name
                 "post_link": post_link,       # Link to target channel
                 "product_ref": product_ref,   # ID in target channel
@@ -1146,14 +1179,15 @@ async def scrape_channel_7days_async(channel_username: str):
                 "predicted_category": predicted_category,
                 "generated_description": generated_description,
                 "ai_enhanced": True,
-                "has_media": bool(message.media),
-                "has_text": bool(message.text),
-                "source_message_id": message.id,  # Original source ID
-                "target_message_id": message.id   # Target channel ID (same for now)
+                "has_media": bool(target_message.media),
+                "has_text": bool(target_message.text),
+                "source_message_id": matching_source['source_message_id'],  # Original source ID
+                "target_message_id": target_message.id   # Actual target channel ID
             }
             scraped_data.append(post_data)
         
         print(f"📋 Found {len(scraped_data)} total messages with AI enhancement from {channel_username}")
+        print(f"📊 Statistics: {len(source_messages)} source messages, {len(scraped_data)} matched in target channel")
         
         # Load existing data DIRECTLY FROM S3 JSON
         existing_data = load_scraped_data_from_s3()
@@ -1161,7 +1195,7 @@ async def scrape_channel_7days_async(channel_username: str):
         print(f"📁 Loaded existing data with {len(existing_data)} records from S3 JSON")
 
         if scraped_data:
-            # Combine and deduplicate by product_ref
+            # Combine and deduplicate by product_ref (which is now target message ID)
             combined_data = existing_data.copy()
             
             # Create a set of existing product_refs for quick lookup
@@ -1531,7 +1565,7 @@ def unknown_command(update, context):
         "/listchannels\n"
         "/checkchannel @ChannelUsername\n"
         "/deletechannel @ChannelUsername\n"
-        "/setup v7 - Set up Telegram session\n"
+        "/setup v8 - Set up Telegram session\n"
         "/check_session - Check session status\n"
         "/checksessionusage - Session usage stats\n"
         "/test - Test connection\n"
