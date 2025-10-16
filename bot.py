@@ -1085,9 +1085,9 @@ async def scrape_channel_7days_async(channel_username: str):
             track_session_usage("scraping", False, f"Invalid channel: {str(e)}")
             return False, f"❌ Channel {channel_username} is invalid or doesn't exist."
 
-        # Simple cutoff logic - EXACTLY like reference code
         now = datetime.now(timezone.utc)
         cutoff = now - timedelta(days=7)
+        print(f"⏰ Scraping ALL messages from last 7 days (since {cutoff})")
 
         # First, collect source messages
         source_messages = []
@@ -1096,16 +1096,17 @@ async def scrape_channel_7days_async(channel_username: str):
         print(f"📡 Collecting messages from source channel: {channel_username}")
         
         async for message in telethon_client.iter_messages(source_entity, limit=None):
-            # CUTOFF CHECK FIRST - exactly like reference code
-            if message.date < cutoff:
-                break
-                
-            if not message.text:
-                continue
-
             message_count += 1
             if message_count % 20 == 0:
                 print(f"📊 Scanned {message_count} source messages... Found {len(source_messages)} valid messages")
+                
+            if message.date < cutoff:
+                print(f"⏹️ Reached 7-day cutoff. Scanned {message_count} total messages, found {len(source_messages)} valid messages in last 7 days")
+                break
+                
+            # Skip messages without text
+            if not message.text:
+                continue
 
             source_messages.append({
                 'text': message.text,
@@ -1114,8 +1115,6 @@ async def scrape_channel_7days_async(channel_username: str):
                 'source_message_id': message.id
             })
 
-        print(f"⏹️ Reached 7-day cutoff. Scanned {message_count} total messages, found {len(source_messages)} valid messages in last 7 days")
-
         # Now scan TARGET channel to find matching forwarded messages
         scraped_data = []
         target_messages_count = 0
@@ -1123,18 +1122,22 @@ async def scrape_channel_7days_async(channel_username: str):
         
         print(f"🔍 Searching for matching messages in target channel {FORWARD_CHANNEL}...")
         
+        # 🔴 FIXED: Scan TARGET entity, not source entity
         async for target_message in telethon_client.iter_messages(target_entity, limit=None):
-            # CUTOFF CHECK FIRST - exactly like reference code
-            if target_message.date < cutoff:
-                break
-                
-            if not target_message.text:
-                continue
-                
             target_messages_count += 1
             if target_messages_count % 20 == 0:
                 print(f"📊 Scanned {target_messages_count} target messages... Found {len(scraped_data)} matches")
-
+           
+            # 🔴 FIXED: Use target_message.date, not source_messages.date
+            if target_message.date < cutoff:
+                print(f"⏹️ Reached 7-day cutoff in target channel. Scanned {target_messages_count} total messages")
+                break
+                
+            # 🔴 FIXED: Use target_message.text, not source_messages.text
+            if not target_message.text:
+                continue
+                
+            # 🔴 FIXED: Use target_message.id, not source_messages.id
             if target_message.id in seen_posts:
                 continue
             seen_posts.add(target_message.id)
@@ -1570,7 +1573,7 @@ def unknown_command(update, context):
         "/listchannels\n"
         "/checkchannel @ChannelUsername\n"
         "/deletechannel @ChannelUsername\n"
-        "/setup v4 - Set up Telegram session\n"
+        "/setup v5 - Set up Telegram session\n"
         "/check_session - Check session status\n"
         "/checksessionusage - Session usage stats\n"
         "/test - Test connection\n"
