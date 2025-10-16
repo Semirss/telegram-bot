@@ -1085,10 +1085,10 @@ async def scrape_channel_7days_async(channel_username: str):
             track_session_usage("scraping", False, f"Invalid channel: {str(e)}")
             return False, f"❌ Channel {channel_username} is invalid or doesn't exist."
 
-        # Simple cutoff logic
+        # Simple cutoff logic - EXACTLY like reference code
         now = datetime.now(timezone.utc)
         cutoff = now - timedelta(days=7)
-        
+
         # First, collect source messages
         source_messages = []
         message_count = 0
@@ -1096,12 +1096,13 @@ async def scrape_channel_7days_async(channel_username: str):
         print(f"📡 Collecting messages from source channel: {channel_username}")
         
         async for message in telethon_client.iter_messages(source_entity, limit=None):
-            if not message.text:
-                continue
-
+            # CUTOFF CHECK FIRST - exactly like reference code
             if message.date < cutoff:
                 break
                 
+            if not message.text:
+                continue
+
             message_count += 1
             if message_count % 20 == 0:
                 print(f"📊 Scanned {message_count} source messages... Found {len(source_messages)} valid messages")
@@ -1123,11 +1124,12 @@ async def scrape_channel_7days_async(channel_username: str):
         print(f"🔍 Searching for matching messages in target channel {FORWARD_CHANNEL}...")
         
         async for target_message in telethon_client.iter_messages(target_entity, limit=None):
-            if not target_message.text:
-                continue
-
+            # CUTOFF CHECK FIRST - exactly like reference code
             if target_message.date < cutoff:
                 break
+                
+            if not target_message.text:
+                continue
                 
             target_messages_count += 1
             if target_messages_count % 20 == 0:
@@ -1568,7 +1570,7 @@ def unknown_command(update, context):
         "/listchannels\n"
         "/checkchannel @ChannelUsername\n"
         "/deletechannel @ChannelUsername\n"
-        "/setup v3 - Set up Telegram session\n"
+        "/setup v4 - Set up Telegram session\n"
         "/check_session - Check session status\n"
         "/checksessionusage - Session usage stats\n"
         "/test - Test connection\n"
