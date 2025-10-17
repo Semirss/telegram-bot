@@ -680,50 +680,29 @@ async def forward_last_7d_async(channel_username: str):
     telethon_client = None
     
     try:
-        # Use direct S3 access for forwarded data
-        print("🔍 Loading forwarded messages data directly from S3...")
-        
         telethon_client = await get_telethon_client()
         if not telethon_client:
-            error_msg = "Failed to initialize Telethon client after retries"
-            track_session_usage("forwarding", False, error_msg)
-            return False, "❌ Could not establish connection. Please try again or check /checksessionusage."
-        
-        print(f"🔍 Checking if channel {channel_username} exists...")
-        
-        try:
-            entity = await asyncio.wait_for(
-                telethon_client.get_entity(channel_username), 
-                timeout=15
-            )
-            print(f"✅ Channel found: {entity.title}")
-        except (ChannelInvalidError, UsernameInvalidError, UsernameNotOccupiedError) as e:
-            error_msg = f"Invalid channel: {str(e)}"
-            track_session_usage("forwarding", False, error_msg)
-            return False, f"❌ Channel {channel_username} is invalid or doesn't exist."
-        except asyncio.TimeoutError:
-            error_msg = "Timeout accessing channel"
-            track_session_usage("forwarding", False, error_msg)
-            return False, f"❌ Timeout accessing channel {channel_username}"
-        except Exception as e:
-            error_msg = f"Error accessing channel: {str(e)}"
-            track_session_usage("forwarding", False, error_msg)
-            return False, f"❌ Error accessing channel: {str(e)}"
+            return False, "❌ Could not establish connection."
 
-        # Verify target channel
+        # Get channel entity
+        try:
+            entity = await telethon_client.get_entity(channel_username)
+            print(f"✅ Channel found: {entity.title}")
+        except Exception as e:
+            return False, f"❌ Channel {channel_username} is invalid or doesn't exist."
+
+        # Get target channel
         try:
             target_entity = await telethon_client.get_entity(FORWARD_CHANNEL)
             print(f"✅ Target channel: {target_entity.title}")
         except Exception as e:
-            error_msg = f"Cannot access target channel: {str(e)}"
-            track_session_usage("forwarding", False, error_msg)
             return False, f"❌ Cannot access target channel: {str(e)}"
 
         now = datetime.now(timezone.utc)
         cutoff = now - timedelta(days=7)
         print(f"⏰ Forwarding messages since: {cutoff}")
 
-        # Load previously forwarded messages with timestamps - DIRECT FROM S3
+        # Load previously forwarded messages
         all_forwarded_data = load_json_from_s3(f"data/{FORWARDED_FILE}")
         if not isinstance(all_forwarded_data, dict):
             all_forwarded_data = {}
@@ -734,40 +713,23 @@ async def forward_last_7d_async(channel_username: str):
         forwarded_ids = {
             int(msg_id): datetime.strptime(ts, "%Y-%m-%d %H:%M:%S") 
             for msg_id, ts in channel_forwarded.items()
-        } if channel_forwarded else {}
-
-        # Remove forwarded IDs older than 7 days
-        week_cutoff = now - timedelta(days=7)
-        forwarded_ids = {msg_id: ts for msg_id, ts in forwarded_ids.items() 
-                         if ts >= week_cutoff.replace(tzinfo=None)}
+        }
 
         messages_to_forward = []
-        message_count = 0
         
         print(f"📨 Fetching messages from {channel_username}...")
         
-        try:
-            async for message in telethon_client.iter_messages(entity, limit=None):
-                message_count += 1
-                if message_count % 10 == 0:
-                    print(f"📊 Processed {message_count} messages...")
-                    
-                if message.date < cutoff:
-                    print(f"⏹️ Reached cutoff time at message {message_count}")
-                    break
-                    
-                # Check if message is already forwarded and has content
-                if message.id not in forwarded_ids and (message.text or message.media):
-                    messages_to_forward.append(message)
-                    print(f"✅ Added message {message.id} from {message.date}")
-
-        except Exception as e:
-            print(f"⚠️ Error fetching messages: {e}")
+        # Simple message collection - no complex checks
+        async for message in telethon_client.iter_messages(entity, limit=None):
+            if message.date < cutoff:
+                break
+                
+            if message.id not in forwarded_ids and (message.text or message.media):
+                messages_to_forward.append(message)
 
         print(f"📋 Found {len(messages_to_forward)} new messages to forward")
 
         if not messages_to_forward:
-            track_session_usage("forwarding", True, "No new messages to forward")
             return False, f"📭 No new posts found in the last 7d from {channel_username}."
 
         # Reverse to forward in chronological order
@@ -776,17 +738,14 @@ async def forward_last_7d_async(channel_username: str):
         
         print(f"➡️ Forwarding {len(messages_to_forward)} messages from {channel_username}...")
         
-        # Forward in batches of 10 to avoid rate limits
+        # Forward in batches of 10
         for i in range(0, len(messages_to_forward), 10):
             batch = messages_to_forward[i:i+10]
             try:
-                await asyncio.wait_for(
-                    telethon_client.forward_messages(
-                        entity=FORWARD_CHANNEL,
-                        messages=[msg.id for msg in batch],
-                        from_peer=channel_username
-                    ),
-                    timeout=30
+                await telethon_client.forward_messages(
+                    entity=FORWARD_CHANNEL,
+                    messages=[msg.id for msg in batch],
+                    from_peer=channel_username
                 )
                 
                 # Update forwarded IDs
@@ -794,51 +753,36 @@ async def forward_last_7d_async(channel_username: str):
                     forwarded_ids[msg.id] = msg.date.replace(tzinfo=None)
                     total_forwarded += 1
                 
-                print(f"✅ Forwarded batch {i//10 + 1}/{(len(messages_to_forward)-1)//10 + 1} ({len(batch)} messages)")
+                print(f"✅ Forwarded batch {i//10 + 1}")
                 await asyncio.sleep(1)
                 
-            except ChatForwardsRestrictedError:
-                print(f"🚫 Forwarding restricted for channel {channel_username}, skipping...")
-                break
             except FloodWaitError as e:
                 print(f"⏳ Flood wait error ({e.seconds}s). Waiting...")
                 await asyncio.sleep(e.seconds)
-                continue
-            except asyncio.TimeoutError:
-                print(f"⚠️ Forwarding timed out for {channel_username}, skipping batch...")
-                continue
-            except RPCError as e:
-                print(f"⚠️ RPC Error for {channel_username}: {e}")
-                continue
             except Exception as e:
-                print(f"⚠️ Unexpected error forwarding from {channel_username}: {e}")
+                print(f"⚠️ Error forwarding batch: {e}")
                 continue
 
-        # Update channel data and save entire structure DIRECTLY TO S3
+        # Save updated forwarded data
         all_forwarded_data[channel_username] = {
             str(k): v.strftime("%Y-%m-%d %H:%M:%S") for k, v in forwarded_ids.items()
         }
         save_json_to_s3(all_forwarded_data, f"data/{FORWARDED_FILE}")
 
         if total_forwarded > 0:
-            track_session_usage("forwarding", True, f"Forwarded {total_forwarded} messages")
             return True, f"✅ Successfully forwarded {total_forwarded} new posts from {channel_username}."
         else:
-            track_session_usage("forwarding", False, "No messages forwarded")
             return False, f"📭 No new posts to forward from {channel_username}."
 
     except Exception as e:
-        error_msg = f"Critical error: {str(e)}"
-        print(f"❌ {error_msg}")
-        track_session_usage("forwarding", False, error_msg)
+        print(f"❌ Critical error: {str(e)}")
         return False, f"❌ Critical error: {str(e)}"
     finally:
-        # Upload session file to S3 after operations
+        # Clean up
         if telethon_client:
             try:
                 await telethon_client.disconnect()
-                print("📤 Uploading updated session file to S3...")
-                # Read the updated session file and upload to S3
+                # Upload session file to S3
                 if os.path.exists(USER_SESSION_FILE):
                     with open(USER_SESSION_FILE, 'rb') as f:
                         s3.put_object(
@@ -850,7 +794,7 @@ async def forward_last_7d_async(channel_username: str):
                     # Clean up temporary file
                     os.remove(USER_SESSION_FILE)
             except Exception as e:
-                print(f"⚠️ Error uploading session file: {e}")
+                print(f"⚠️ Error during cleanup: {e}")
 
 def forward_last_7d_sync(channel_username: str):
     """Synchronous wrapper for the async forwarding function"""
@@ -861,7 +805,6 @@ def forward_last_7d_sync(channel_username: str):
         loop.close()
         return result
     except Exception as e:
-        track_session_usage("forwarding", False, f"Sync error: {str(e)}")
         return False, f"❌ Error: {str(e)}"
 # ======================
 # Session management commands with S3
