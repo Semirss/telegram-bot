@@ -672,12 +672,11 @@ async def get_telethon_client():
                 return None
     
     return None
-
 # ======================
-# Forward last 7d posts with EXACT SAME cutoff logic as scraping
+# Forward last 7d posts with PURE S3 integration
 # ======================
 async def forward_last_7d_async(channel_username: str):
-    """Async function to forward messages using the main Telethon client with EXACT 7-day cutoff"""
+    """Async function to forward messages using the main Telethon client"""
     telethon_client = None
     
     try:
@@ -720,10 +719,9 @@ async def forward_last_7d_async(channel_username: str):
             track_session_usage("forwarding", False, error_msg)
             return False, f"❌ Cannot access target channel: {str(e)}"
 
-        # 🔥 EXACT SAME CUTOFF LOGIC AS SCRAPING FUNCTION
         now = datetime.now(timezone.utc)
         cutoff = now - timedelta(days=7)
-        print(f"⏰ Forwarding messages since: {cutoff} (EXACT 7-day cutoff)")
+        print(f"⏰ Forwarding messages since: {cutoff}")
 
         # Load previously forwarded messages with timestamps - DIRECT FROM S3
         all_forwarded_data = load_json_from_s3(f"data/{FORWARDED_FILE}")
@@ -738,69 +736,50 @@ async def forward_last_7d_async(channel_username: str):
             for msg_id, ts in channel_forwarded.items()
         } if channel_forwarded else {}
 
-        # Remove forwarded IDs older than 7 days (same logic as scraping)
+        # Remove forwarded IDs older than 7 days
         week_cutoff = now - timedelta(days=7)
         forwarded_ids = {msg_id: ts for msg_id, ts in forwarded_ids.items() 
                          if ts >= week_cutoff.replace(tzinfo=None)}
 
         messages_to_forward = []
         message_count = 0
-        skipped_before_cutoff = 0
-        skipped_no_content = 0
-        skipped_already_forwarded = 0
         
-        print(f"📨 Fetching ALL messages from {channel_username} (will apply cutoff during processing)...")
+        print(f"📨 Fetching messages from {channel_username}...")
         
         try:
             async for message in telethon_client.iter_messages(entity, limit=None):
                 message_count += 1
-                if message_count % 20 == 0:
-                    print(f"📊 Scanned {message_count} messages... Found {len(messages_to_forward)} to forward")
-                
-                # 🔥 EXACT SAME CUTOFF CHECK AS SCRAPING FUNCTION
+                if message_count % 10 == 0:
+                    print(f"📊 Processed {message_count} messages...")
+                    
                 if message.date < cutoff:
-                    skipped_before_cutoff += 1
-                    if skipped_before_cutoff == 1:  # Log only first cutoff hit
-                        print(f"⏹️ Reached 7-day cutoff at message {message_count}")
-                    continue  # Skip messages older than 7 days
+                    print(f"⏹️ Reached cutoff time at message {message_count}")
+                    break
                     
-                # Check if message is already forwarded
-                if message.id in forwarded_ids:
-                    skipped_already_forwarded += 1
-                    continue
-                    
-                # Check if message has content (same as scraping)
-                if not message.text and not message.media:
-                    skipped_no_content += 1
-                    continue
-
-                messages_to_forward.append(message)
-
-            print(f"📋 Scan complete: {message_count} total, {len(messages_to_forward)} to forward")
-            print(f"📊 Breakdown: {skipped_before_cutoff} before cutoff, {skipped_already_forwarded} already forwarded, {skipped_no_content} no content")
+                # Check if message is already forwarded and has content
+                if message.id not in forwarded_ids and (message.text or message.media):
+                    messages_to_forward.append(message)
+                    print(f"✅ Added message {message.id} from {message.date}")
 
         except Exception as e:
             print(f"⚠️ Error fetching messages: {e}")
+
+        print(f"📋 Found {len(messages_to_forward)} new messages to forward")
 
         if not messages_to_forward:
             track_session_usage("forwarding", True, "No new messages to forward")
             return False, f"📭 No new posts found in the last 7d from {channel_username}."
 
-        # Reverse to forward in chronological order (oldest first)
+        # Reverse to forward in chronological order
         messages_to_forward.reverse()
         total_forwarded = 0
-        failed_forwarded = 0
         
         print(f"➡️ Forwarding {len(messages_to_forward)} messages from {channel_username}...")
         
-        # Forward in smaller batches to avoid rate limits
-        batch_size = 5
-        for i in range(0, len(messages_to_forward), batch_size):
-            batch = messages_to_forward[i:i+batch_size]
-            batch_success_count = 0
-            
+        # Forward in batches of 10 to avoid rate limits
+        for i in range(0, len(messages_to_forward), 10):
+            batch = messages_to_forward[i:i+10]
             try:
-                # Forward the batch
                 await asyncio.wait_for(
                     telethon_client.forward_messages(
                         entity=FORWARD_CHANNEL,
@@ -810,38 +789,30 @@ async def forward_last_7d_async(channel_username: str):
                     timeout=30
                 )
                 
-                # Update forwarded IDs for successful batch
+                # Update forwarded IDs
                 for msg in batch:
                     forwarded_ids[msg.id] = msg.date.replace(tzinfo=None)
                     total_forwarded += 1
-                    batch_success_count += 1
                 
-                print(f"✅ Forwarded batch {i//batch_size + 1}/{(len(messages_to_forward)-1)//batch_size + 1} ({batch_success_count}/{len(batch)} messages)")
+                print(f"✅ Forwarded batch {i//10 + 1}/{(len(messages_to_forward)-1)//10 + 1} ({len(batch)} messages)")
+                await asyncio.sleep(1)
                 
             except ChatForwardsRestrictedError:
-                print(f"🚫 Forwarding restricted for channel {channel_username}, stopping...")
-                failed_forwarded += len(batch)
+                print(f"🚫 Forwarding restricted for channel {channel_username}, skipping...")
                 break
             except FloodWaitError as e:
                 print(f"⏳ Flood wait error ({e.seconds}s). Waiting...")
-                failed_forwarded += len(batch)
                 await asyncio.sleep(e.seconds)
                 continue
             except asyncio.TimeoutError:
                 print(f"⚠️ Forwarding timed out for {channel_username}, skipping batch...")
-                failed_forwarded += len(batch)
                 continue
             except RPCError as e:
                 print(f"⚠️ RPC Error for {channel_username}: {e}")
-                failed_forwarded += len(batch)
                 continue
             except Exception as e:
                 print(f"⚠️ Unexpected error forwarding from {channel_username}: {e}")
-                failed_forwarded += len(batch)
                 continue
-            
-            # Small delay between batches to avoid rate limits
-            await asyncio.sleep(0.5)
 
         # Update channel data and save entire structure DIRECTLY TO S3
         all_forwarded_data[channel_username] = {
@@ -849,13 +820,9 @@ async def forward_last_7d_async(channel_username: str):
         }
         save_json_to_s3(all_forwarded_data, f"data/{FORWARDED_FILE}")
 
-        # Final statistics
         if total_forwarded > 0:
-            result_msg = f"✅ Successfully forwarded {total_forwarded} new posts from {channel_username}."
-            if failed_forwarded > 0:
-                result_msg += f" ({failed_forwarded} failed)"
-            track_session_usage("forwarding", True, f"Forwarded {total_forwarded}, failed {failed_forwarded}")
-            return True, result_msg
+            track_session_usage("forwarding", True, f"Forwarded {total_forwarded} messages")
+            return True, f"✅ Successfully forwarded {total_forwarded} new posts from {channel_username}."
         else:
             track_session_usage("forwarding", False, "No messages forwarded")
             return False, f"📭 No new posts to forward from {channel_username}."
@@ -1088,13 +1055,11 @@ def check_session_usage(update, context):
         
     except Exception as e:
         update.message.reply_text(f"❌ Error checking session usage: {e}")
-
-
-     # ======================
-# 7-day scraping function with EXACT SAME cutoff and matching
+# ======================
+# 7-day scraping function with EXACT 1:1 matching
 # ======================
 async def scrape_channel_7days_async(channel_username: str):
-    """Scrape last 7 days of data with EXACT SAME cutoff as forwarding"""
+    """Scrape last 7 days of data with exact 1:1 target channel matching"""
     telethon_client = None
     
     try:
@@ -1120,16 +1085,13 @@ async def scrape_channel_7days_async(channel_username: str):
             track_session_usage("scraping", False, f"Invalid channel: {str(e)}")
             return False, f"❌ Channel {channel_username} is invalid or doesn't exist."
 
-        # 🔥 EXACT SAME CUTOFF LOGIC AS FORWARDING FUNCTION
         now = datetime.now(timezone.utc)
         cutoff = now - timedelta(days=7)
-        print(f"⏰ Scraping ALL messages from last 7 days (since {cutoff}) - EXACT SAME CUTOFF")
+        print(f"⏰ Scraping ALL messages from last 7 days (since {cutoff})")
 
-        # STEP 1: Collect source messages (EXACT SAME CUTOFF as forwarding)
+        # STEP 1: Collect source messages (PROTECTED with cutoff)
         source_messages = []
         source_message_count = 0
-        source_skipped_before_cutoff = 0
-        source_skipped_no_text = 0
         
         print(f"📡 Collecting source messages from: {channel_username}")
         
@@ -1138,15 +1100,12 @@ async def scrape_channel_7days_async(channel_username: str):
             if source_message_count % 20 == 0:
                 print(f"📊 Scanned {source_message_count} source messages... Found {len(source_messages)} valid")
                 
-            # 🔥 EXACT SAME CUTOFF: Stop when we reach 7-day limit
+            # 🔥 PROTECTED CUTOFF: Stop when we reach 7-day limit
             if message.date < cutoff:
-                source_skipped_before_cutoff += 1
-                if source_skipped_before_cutoff == 1:  # Log only first cutoff hit
-                    print(f"⏹️ Reached 7-day cutoff in source. Scanned {source_message_count} total")
-                continue
+                print(f"⏹️ Reached 7-day cutoff in source. Scanned {source_message_count} total, found {len(source_messages)} valid")
+                break
                 
             if not message.text:
-                source_skipped_no_text += 1
                 continue
 
             source_messages.append({
@@ -1156,14 +1115,9 @@ async def scrape_channel_7days_async(channel_username: str):
                 'source_message_id': message.id
             })
 
-        print(f"📋 Source scan complete: {source_message_count} total, {len(source_messages)} valid")
-        print(f"📊 Source breakdown: {source_skipped_before_cutoff} before cutoff, {source_skipped_no_text} no text")
-
-        # STEP 2: Scan target channel for matches (EXACT SAME CUTOFF as forwarding)
+        # STEP 2: Scan target channel for matches (PROTECTED with cutoff)
         scraped_data = []
         target_message_count = 0
-        target_skipped_before_cutoff = 0
-        target_skipped_no_text = 0
         matched_count = 0
         used_source_ids = set()  # 🔥 TRACK which source messages we've already matched
         used_target_ids = set()  # 🔥 TRACK which target messages we've already matched
@@ -1175,15 +1129,12 @@ async def scrape_channel_7days_async(channel_username: str):
             if target_message_count % 20 == 0:
                 print(f"📊 Scanned {target_message_count} target messages... Found {matched_count} matches")
                 
-            # 🔥 EXACT SAME CUTOFF: Stop when we reach 7-day limit in target
+            # 🔥 PROTECTED CUTOFF: Stop when we reach 7-day limit in target
             if target_message.date < cutoff:
-                target_skipped_before_cutoff += 1
-                if target_skipped_before_cutoff == 1:  # Log only first cutoff hit
-                    print(f"⏹️ Reached 7-day cutoff in target. Scanned {target_message_count} total")
-                continue
+                print(f"⏹️ Reached 7-day cutoff in target. Scanned {target_message_count} total, found {matched_count} matches")
+                break
                 
             if not target_message.text:
-                target_skipped_no_text += 1
                 continue
                 
             # 🔥 PREVENT DUPLICATE TARGET MATCHES
@@ -1271,7 +1222,6 @@ async def scrape_channel_7days_async(channel_username: str):
         
         print(f"📋 Found {len(scraped_data)} exact 1:1 matches with AI enhancement")
         print(f"📊 Statistics: {len(source_messages)} source messages, {matched_count} matched in target channel")
-        print(f"📊 Target breakdown: {target_message_count} total, {target_skipped_before_cutoff} before cutoff, {target_skipped_no_text} no text")
         
         # Load existing data DIRECTLY FROM S3 JSON
         existing_data = load_scraped_data_from_s3()
@@ -1343,6 +1293,7 @@ async def scrape_channel_7days_async(channel_username: str):
                     os.remove(USER_SESSION_FILE)
             except Exception as e:
                 print(f"⚠️ Error during cleanup: {e}")
+
 def scrape_channel_7days_sync(channel_username: str):
     """Synchronous wrapper for 7-day scraping"""
     try:
