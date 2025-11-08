@@ -26,6 +26,7 @@ import psutil
 import speedtest
 from telegram import Bot
 from telegram.error import BadRequest, Conflict  
+import schedule 
 app = Flask(__name__)
 
 @app.route("/")
@@ -1953,6 +1954,316 @@ def check_s3_status(update, context):
         update.message.reply_text(f"❌ Error checking S3 status: {e}")
 
 @authorized
+def start_24h_auto_scraping(update, context):
+    """Start automatic 24-hour scraping and forwarding (Bot2 functionality)"""
+    def run_auto_scraping():
+        try:
+            async def auto_scraping_async():
+                telethon_client = None
+                try:
+                    update.message.reply_text("🔄 Starting 24-hour auto-scraping cycle...")
+                    
+                    # Step 1: Forward messages from all channels
+                    update.message.reply_text("📤 Step 1: Forwarding new messages from all channels...")
+                    
+                    telethon_client = await get_telethon_client()
+                    if not telethon_client:
+                        return False, "❌ Could not establish connection."
+                    
+                    # Get all channels from database
+                    channels = list(channels_collection.find({}))
+                    if not channels:
+                        return False, "❌ No channels found in database."
+                    
+                    channel_usernames = [ch["username"] for ch in channels]
+                    
+                    now = datetime.now(timezone.utc)
+                    cutoff = now - timedelta(days=1)  # 24 hours
+                    
+                    # Load forwarded messages from S3
+                    all_forwarded_data = load_json_from_s3(f"data/{FORWARDED_FILE}")
+                    if not isinstance(all_forwarded_data, dict):
+                        all_forwarded_data = {}
+                    
+                    total_forwarded = 0
+                    
+                    for channel_username in channel_usernames:
+                        try:
+                            update.message.reply_text(f"⏳ Processing {channel_username}...")
+                            
+                            entity = await telethon_client.get_entity(channel_username)
+                            print(f"✅ Channel found: {entity.title}")
+                            
+                            # Get or initialize for this channel
+                            channel_forwarded = all_forwarded_data.get(channel_username, {})
+                            forwarded_ids = {
+                                int(msg_id): datetime.strptime(ts, "%Y-%m-%d %H:%M:%S") 
+                                for msg_id, ts in channel_forwarded.items()
+                            } if channel_forwarded else {}
+                            
+                            # Remove old forwarded IDs
+                            week_cutoff = now - timedelta(days=7)
+                            forwarded_ids = {msg_id: ts for msg_id, ts in forwarded_ids.items() 
+                                           if ts >= week_cutoff.replace(tzinfo=None)}
+                            
+                            messages_to_forward = []
+                            
+                            async for message in telethon_client.iter_messages(entity, limit=None):
+                                if message.date < cutoff:
+                                    break
+                                    
+                                if message.id not in forwarded_ids and (message.text or message.media):
+                                    messages_to_forward.append(message)
+                            
+                            if not messages_to_forward:
+                                continue
+                            
+                            # Reverse to forward in chronological order
+                            messages_to_forward.reverse()
+                            channel_forwarded_count = 0
+                            
+                            # Forward in batches
+                            for i in range(0, len(messages_to_forward), 10):
+                                batch = messages_to_forward[i:i+10]
+                                try:
+                                    await asyncio.wait_for(
+                                        telethon_client.forward_messages(
+                                            entity=FORWARD_CHANNEL,
+                                            messages=[msg.id for msg in batch],
+                                            from_peer=channel_username
+                                        ),
+                                        timeout=30
+                                    )
+                                    
+                                    for msg in batch:
+                                        forwarded_ids[msg.id] = msg.date.replace(tzinfo=None)
+                                        channel_forwarded_count += 1
+                                        total_forwarded += 1
+                                    
+                                    await asyncio.sleep(1)
+                                    
+                                except ChatForwardsRestrictedError:
+                                    print(f"🚫 Forwarding restricted for {channel_username}")
+                                    break
+                                except FloodWaitError as e:
+                                    await asyncio.sleep(e.seconds)
+                                    continue
+                                except Exception as e:
+                                    print(f"⚠️ Error forwarding batch: {e}")
+                                    continue
+                            
+                            # Update channel data
+                            all_forwarded_data[channel_username] = {
+                                str(k): v.strftime("%Y-%m-%d %H:%M:%S") for k, v in forwarded_ids.items()
+                            }
+                            
+                            if channel_forwarded_count > 0:
+                                update.message.reply_text(f"✅ Forwarded {channel_forwarded_count} messages from {channel_username}")
+                            
+                        except Exception as e:
+                            print(f"❌ Error processing {channel_username}: {e}")
+                            continue
+                    
+                    # Save all forwarded data
+                    save_json_to_s3(all_forwarded_data, f"data/{FORWARDED_FILE}")
+                    
+                    # Step 2: Scrape and AI-enrich from target channel
+                    update.message.reply_text("🤖 Step 2: Scraping and AI-enriching from target channel...")
+                    
+                    try:
+                        target_entity = await telethon_client.get_entity(FORWARD_CHANNEL)
+                        print(f"✅ Target channel: {target_entity.title}")
+                        
+                        # Collect source messages from all channels
+                        source_messages = []
+                        for channel_username in channel_usernames:
+                            try:
+                                source_entity = await telethon_client.get_entity(channel_username)
+                                async for message in telethon_client.iter_messages(source_entity, limit=None):
+                                    if not message.text:
+                                        continue
+                                    if message.date < cutoff:
+                                        break
+                                    source_messages.append({
+                                        'text': message.text,
+                                        'date': message.date,
+                                        'source_channel': channel_username,
+                                        'source_message_id': message.id
+                                    })
+                            except Exception as e:
+                                print(f"❌ Error collecting from {channel_username}: {e}")
+                                continue
+                        
+                        # Scan target channel for matches
+                        scraped_data = []
+                        used_source_ids = set()
+                        used_target_ids = set()
+                        
+                        async for target_message in telethon_client.iter_messages(target_entity, limit=None):
+                            if not target_message.text:
+                                continue
+                            if target_message.date < cutoff:
+                                break
+                            if target_message.id in used_target_ids:
+                                continue
+                            
+                            # Find matching source message
+                            matching_source = None
+                            for source_msg in source_messages:
+                                if source_msg['source_message_id'] in used_source_ids:
+                                    continue
+                                    
+                                source_text_clean = source_msg['text'].strip().lower()
+                                target_text_clean = target_message.text.strip().lower()
+                                
+                                if (source_text_clean == target_text_clean or
+                                    source_text_clean in target_text_clean or
+                                    target_text_clean in source_text_clean or
+                                    (len(source_text_clean) > 100 and len(target_text_clean) > 100 and
+                                     source_text_clean[:100] == target_text_clean[:100])):
+                                    matching_source = source_msg
+                                    break
+                            
+                            if not matching_source:
+                                continue
+                            
+                            used_source_ids.add(matching_source['source_message_id'])
+                            used_target_ids.add(target_message.id)
+                            
+                            # Extract info and AI enhance
+                            info = extract_info(target_message.text, target_message.id)
+                            predicted_category, generated_description = enrich_product_with_ai(info["title"], info["description"])
+                            
+                            # Create post link
+                            if getattr(target_entity, "username", None):
+                                post_link = f"https://t.me/{target_entity.username}/{target_message.id}"
+                            else:
+                                internal_id = str(target_entity.id)
+                                if internal_id.startswith("-100"):
+                                    internal_id = internal_id[4:]
+                                post_link = f"https://t.me/c/{internal_id}/{target_message.id}"
+                            
+                            post_data = {
+                                "title": info["title"],
+                                "description": info["description"],
+                                "price": info["price"],
+                                "phone": info["phone"],
+                                "location": info["location"],
+                                "date": target_message.date.strftime("%Y-%m-%d %H:%M:%S"),
+                                "channel": matching_source['source_channel'],
+                                "post_link": post_link,
+                                "product_ref": str(target_message.id),
+                                "scraped_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                "predicted_category": predicted_category,
+                                "generated_description": generated_description,
+                                "ai_enhanced": True,
+                                "source_message_id": matching_source['source_message_id'],
+                                "target_message_id": target_message.id
+                            }
+                            scraped_data.append(post_data)
+                        
+                        # Save to S3
+                        existing_data = load_scraped_data_from_s3()
+                        existing_refs = {item['product_ref'] for item in existing_data}
+                        new_items = [item for item in scraped_data if item['product_ref'] not in existing_refs]
+                        
+                        if new_items:
+                            combined_data = existing_data + new_items
+                            success = save_scraped_data_to_s3(combined_data)
+                            
+                            if success:
+                                # Print AI summary
+                                category_counts = {}
+                                for item in new_items:
+                                    category = item.get('predicted_category', 'Unknown')
+                                    category_counts[category] = category_counts.get(category, 0) + 1
+                                
+                                summary_msg = f"✅ 24-hour cycle completed!\n\n"
+                                summary_msg += f"📤 Forwarded: {total_forwarded} messages\n"
+                                summary_msg += f"🤖 AI-Enhanced: {len(new_items)} new products\n\n"
+                                summary_msg += f"📊 New Categories:\n"
+                                for category, count in category_counts.items():
+                                    summary_msg += f"• {category}: {count}\n"
+                                
+                                return True, summary_msg
+                            else:
+                                return False, "❌ Failed to save AI-enhanced data to S3."
+                        else:
+                            return True, f"✅ 24-hour cycle completed!\n\n📤 Forwarded: {total_forwarded} messages\n🤖 No new products to AI-enhance."
+                            
+                    except Exception as e:
+                        return False, f"❌ Scraping error: {str(e)}"
+                    
+                except Exception as e:
+                    return False, f"❌ Auto-scraping error: {str(e)}"
+                finally:
+                    if telethon_client:
+                        await telethon_client.disconnect()
+                        # Upload session to S3
+                        if os.path.exists(USER_SESSION_FILE):
+                            with open(USER_SESSION_FILE, 'rb') as f:
+                                s3.put_object(
+                                    Bucket=AWS_BUCKET_NAME,
+                                    Key=f"sessions/{USER_SESSION_FILE}",
+                                    Body=f.read()
+                                )
+                            os.remove(USER_SESSION_FILE)
+            
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            success, result = loop.run_until_complete(auto_scraping_async())
+            loop.close()
+            
+            context.bot.send_message(update.effective_chat.id, text=result)
+            
+        except Exception as e:
+            context.bot.send_message(update.effective_chat.id, text=f"❌ Error in auto-scraping: {e}")
+    
+    threading.Thread(target=run_auto_scraping, daemon=True).start()
+    update.message.reply_text("🚀 Starting 24-hour auto-scraping cycle in background...")
+
+@authorized  
+def schedule_24h_auto_scraping(update, context):
+    """Schedule the 24-hour auto-scraping to run daily"""
+    def run_scheduler():
+        import schedule
+        import time
+        
+        def execute_daily_task():
+            try:
+                # This would need to be adapted to run the auto-scraping logic
+                # For now, we'll just send a notification
+                bot = Bot(token=BOT_TOKEN)
+                bot.send_message(
+                    chat_id=update.effective_chat.id,
+                    text="🕒 Daily auto-scraping time! Use /start_24h_auto_scraping to run now."
+                )
+            except Exception as e:
+                print(f"❌ Scheduler error: {e}")
+        
+        # Schedule daily at a specific time (e.g., 8:00 AM)
+        schedule.every().day.at("08:00").do(execute_daily_task)
+        
+        update.message.reply_text(
+            "✅ 24-hour auto-scraping scheduled!\n\n"
+            "🕒 Will run daily at 08:00 AM\n"
+            "🔔 You will receive a notification when it's time to run.\n\n"
+            "💡 Use /start_24h_auto_scraping to run immediately."
+        )
+        
+        while True:
+            try:
+                schedule.run_pending()
+                time.sleep(60)
+            except Exception as e:
+                print(f"❌ Scheduler error: {e}")
+                time.sleep(60)
+    
+    scheduler_thread = threading.Thread(target=run_scheduler, daemon=True)
+    scheduler_thread.start()
+
+
+@authorized
 def unknown_command(update, context):
     update.message.reply_text(
         "❌ Unknown command.\n\n"
@@ -1972,6 +2283,8 @@ def unknown_command(update, context):
         "/debug_json - Debug S3 JSON file\n"
         "/deletes3files - Delete S3 files\n"
         "/getscrapedjson - Get JSON file\n"
+        "/start_24h_auto_scraping - Run 24-hour auto-scraping cycle\n"
+        "/schedule_24h_auto_scraping - Schedule daily auto-scraping\n"
     )
 
 @authorized
@@ -2126,6 +2439,8 @@ def start(update, context):
         "/debug_json - Debug S3 JSON file\n"
         "/deletes3files - Delete S3 files\n"
         "/getscrapedjson - Get JSON file\n"
+        "/start_24h_auto_scraping - Run 24-hour auto-scraping cycle\n"
+        "/schedule_24h_auto_scraping - Schedule daily auto-scraping\n"
         )
     else:
         update.message.reply_text(
@@ -2195,6 +2510,8 @@ def main():
     dp.add_handler(CommandHandler("deletes3files", delete_s3_files))
     dp.add_handler(CommandHandler("getscrapedjson", get_scraped_json))
     dp.add_handler(CommandHandler("debug_json_comprehensive", debug_json_comprehensive))
+    dp.add_handler(CommandHandler("start_24h_auto_scraping", start_24h_auto_scraping))
+    dp.add_handler(CommandHandler("schedule_24h_auto_scraping", schedule_24h_auto_scraping))
     dp.add_handler(MessageHandler(Filters.command, unknown_command))
 
     print(f"🤖 Bot is running...")
