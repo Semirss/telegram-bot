@@ -15,5 +15,4 @@ pyarrow==20.0.0
 requests==2.31.0
 psutil==5.9.6
 speedtest-cli==2.1.3
-apscheduler==3.10.4
 schedule==1.2.1
