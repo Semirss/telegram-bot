@@ -2226,7 +2226,6 @@ def start_24h_auto_scraping(update, context):
 def schedule_24h_auto_scraping(update, context):
     """Schedule the 24-hour auto-scraping to run daily"""
     def run_scheduler():
-        import schedule
         import time
         
         def execute_daily_task():
