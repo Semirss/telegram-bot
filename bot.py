@@ -1962,15 +1962,12 @@ def unknown_command(update, context):
         "/listchannels\n"
         "/checkchannel @ChannelUsername\n"
         "/deletechannel @ChannelUsername\n"
-        "/setup_session - Set up Telegram session\n"
         "/check_session - Check session status\n"
         "/checksessionusage - Session usage stats\n"
         "/optimizationchecker - Comprehensive performance check\n"
         "/test - Test connection\n"
         "/check_data - Check scraped data\n"
         "/check_s3 - Check S3 status\n"
-        "/cleanup - Cleanup sessions\n"
-        "/clearhistory - Clear forwarded history\n"
         "/diagnose - Diagnose session health\n"
         "/debug_json - Debug S3 JSON file\n"
         "/deletes3files - Delete S3 files\n"
@@ -2112,25 +2109,23 @@ def start(update, context):
     user_id = update.effective_user.id
     if auth_collection.find_one({"user_id": user_id}):
         update.message.reply_text(
-            "✅ You are already authorized!\n\n"
-            "Available commands:\n"
-            "/addchannel @ChannelUsername\n"
-            "/listchannels\n"
-            "/checkchannel @ChannelUsername\n"
-            "/deletechannel @ChannelUsername\n"
-            "/setup_session - Set up Telegram session (first time)\n"
-            "/check_session - Check session status\n"
-            "/checksessionusage - Session usage statistics\n"
-            "/test - Test connection\n"
-            "/check_data - Check scraped data\n"
-            "/check_s3 - Check S3 status\n"
-            "/cleanup - Cleanup sessions\n"
-            "/clearhistory - Clear forwarded history\n"
-            "/diagnose - Diagnose session health\n"
-            "/debug_json - Debug S3 JSON file\n"
-            "/debug_json - Debug a json file in S3\n"
-            "/test_s3_write - Test S3 write access\n"
-            "/debug_json_comprehensive - Comprehensive json debug"
+        "✅ You are already authorized!\n\n"
+        "👉 Available commands:\n"
+        "/addchannel @ChannelUsername\n"
+        "/addmultiplechannels @channel1,@channel2,...\n"
+        "/listchannels\n"
+        "/checkchannel @ChannelUsername\n"
+        "/deletechannel @ChannelUsername\n"
+        "/check_session - Check session status\n"
+        "/checksessionusage - Session usage stats\n"
+        "/optimizationchecker - Comprehensive performance check\n"
+        "/test - Test connection\n"
+        "/check_data - Check scraped data\n"
+        "/check_s3 - Check S3 status\n"
+        "/diagnose - Diagnose session health\n"
+        "/debug_json - Debug S3 JSON file\n"
+        "/deletes3files - Delete S3 files\n"
+        "/getscrapedjson - Get JSON file\n"
         )
     else:
         update.message.reply_text(
@@ -2187,14 +2182,14 @@ def main():
     dp.add_handler(CommandHandler("listchannels", list_channels))
     dp.add_handler(CommandHandler("checkchannel", check_channel))
     dp.add_handler(CommandHandler("deletechannel", delete_channel))
-    dp.add_handler(CommandHandler("setup_session", setup_session))
+    # dp.add_handler(CommandHandler("setup_session", setup_session))
     dp.add_handler(CommandHandler("check_session", check_session))
     dp.add_handler(CommandHandler("checksessionusage", check_session_usage))
     dp.add_handler(CommandHandler("test", test_connection))
     dp.add_handler(CommandHandler("check_data", check_scraped_data))
     dp.add_handler(CommandHandler("check_s3", check_s3_status))
-    dp.add_handler(CommandHandler("cleanup", cleanup_sessions))
-    dp.add_handler(CommandHandler("clearhistory", clear_forwarded_history))
+    # dp.add_handler(CommandHandler("cleanup", cleanup_sessions))
+    # dp.add_handler(CommandHandler("clearhistory", clear_forwarded_history))
     dp.add_handler(CommandHandler("diagnose", diagnose_session))
     dp.add_handler(CommandHandler("debug_json", debug_s3_json))
     dp.add_handler(CommandHandler("deletes3files", delete_s3_files))
