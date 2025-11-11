@@ -2624,7 +2624,7 @@ def remove_verified_callback(update, context):
         for channel in verified_channels:
             username = channel.get("username")
             title = channel.get("title", "Unknown")
-            button_text = f"🔴 {username} - {title}"
+            button_text = f"✅ {username} - {title}"
             
             if len(button_text) > 50:
                 button_text = button_text[:47] + "..."
@@ -2635,7 +2635,7 @@ def remove_verified_callback(update, context):
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         query.edit_message_text(
-            "🔴 <b>Remove Verified Status</b>\n\n"
+            "✅ <b>Remove Verified Status</b>\n\n"
             "Click on any channel to remove its verified status:",
             reply_markup=reply_markup,
             parse_mode="HTML"
