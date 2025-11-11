@@ -2827,9 +2827,131 @@ def check_verification_status(update, context):
         
     except Exception as e:
         update.message.reply_text(f"❌ Error checking verification status: {e}")
+@authorized
+def multiple_verifiedchanneladder(update, context):
+    """Add multiple channels and mark them as verified immediately"""
+    if len(context.args) == 0:
+        update.message.reply_text(
+            "⚡ Usage: /multipleverifiedchanneladder @channel1,@channel2,@channel3\n\n"
+            "This will add multiple channels and mark them as verified immediately.\n\n"
+            "Example: /multipleverifiedchanneladder @channel1,@channel2,@channel3"
+        )
+        return
 
+    channels_input = ' '.join(context.args)
+    channel_usernames = [username.strip() for username in channels_input.split(',') if username.strip()]
+    
+    if not channel_usernames:
+        update.message.reply_text("❌ Please provide valid channel usernames separated by commas.")
+        return
 
+    # Validate usernames
+    invalid_usernames = []
+    valid_usernames = []
+    
+    for username in channel_usernames:
+        if not username.startswith("@"):
+            invalid_usernames.append(username)
+        else:
+            valid_usernames.append(username)
 
+    if invalid_usernames:
+        update.message.reply_text(
+            f"❌ Invalid usernames (must start with @): {', '.join(invalid_usernames)}"
+        )
+        return
+
+    # Check for duplicates and process channels
+    existing_channels = []
+    new_channels = []
+    failed_channels = []
+    added_channels = []
+    
+    for username in valid_usernames:
+        try:
+            # Check if channel already exists
+            existing_channel = channels_collection.find_one({"username": username})
+            if existing_channel:
+                # Update existing channel to verified
+                channels_collection.update_one(
+                    {"username": username},
+                    {"$set": {
+                        "isverified": True,
+                        "verified_at": datetime.now(),
+                        "verified_by": update.effective_user.id
+                    }}
+                )
+                existing_channels.append(f"{username} — {existing_channel.get('title', 'Unknown')}")
+            else:
+                # Add new channel as verified
+                chat = context.bot.get_chat(username)
+                channels_collection.insert_one({
+                    "username": username, 
+                    "title": chat.title,
+                    "isverified": True,
+                    "verified_at": datetime.now(),
+                    "verified_by": update.effective_user.id
+                })
+                new_channels.append(f"{username} — {chat.title}")
+                added_channels.append(username)
+                
+        except BadRequest as e:
+            failed_channels.append(f"{username} — {str(e)}")
+        except Exception as e:
+            failed_channels.append(f"{username} — {str(e)}")
+
+    # Send results
+    result_message = "📊 <b>Multiple Verified Channels Add Results</b>\n\n"
+    
+    if new_channels:
+        result_message += f"✅ <b>New Verified Channels Added ({len(new_channels)}):</b>\n"
+        for channel in new_channels:
+            result_message += f"• {channel}\n"
+        result_message += "\n"
+    
+    if existing_channels:
+        result_message += f"🔄 <b>Existing Channels Updated to Verified ({len(existing_channels)}):</b>\n"
+        for channel in existing_channels:
+            result_message += f"• {channel}\n"
+        result_message += "\n"
+    
+    if failed_channels:
+        result_message += f"❌ <b>Failed to Add/Verify ({len(failed_channels)}):</b>\n"
+        for channel in failed_channels:
+            result_message += f"• {channel}\n"
+
+    update.message.reply_text(result_message, parse_mode="HTML")
+
+    # Run operations for successfully added channels
+    if added_channels:
+        def run_operations_for_channels():
+            try:
+                for username in added_channels:
+                    try:
+                        # Forward messages
+                        update.message.reply_text(f"⏳ Forwarding last 7d posts from verified channel {username}...")
+                        success, result_msg = forward_last_7d_sync(username)
+                        context.bot.send_message(update.effective_chat.id, text=result_msg, parse_mode="HTML")
+                        
+                        time.sleep(2)
+                        
+                        # Scrape data
+                        update.message.reply_text(f"⏳ Starting 7-day data scraping from verified channel {username}...")
+                        success, result_msg = scrape_channel_7days_sync(username)
+                        context.bot.send_message(update.effective_chat.id, text=result_msg, parse_mode="HTML")
+                        
+                        time.sleep(1)  # Small delay between channels
+                        
+                    except Exception as e:
+                        error_msg = f"❌ Error during operations for {username}: {str(e)}"
+                        context.bot.send_message(update.effective_chat.id, text=error_msg, parse_mode="HTML")
+                        continue
+                        
+            except Exception as e:
+                error_msg = f"❌ Error during operations: {str(e)}"
+                context.bot.send_message(update.effective_chat.id, text=error_msg, parse_mode="HTML")
+
+        threading.Thread(target=run_operations_for_channels, daemon=True).start()
 @authorized  
 def schedule_24h_auto_scraping(update, context):
     """Schedule the 24-hour auto-scraping to run daily"""
@@ -2877,6 +2999,7 @@ def unknown_command(update, context):
         "👉 Available commands:\n"
         "/addchannel @ChannelUsername\n"
         "/addmultiplechannels @channel1,@channel2,...\n"
+        "/multipleverifiedchanneladder @channel1,@channel2,... - Add multiple verified channels\n"
         "/verifiedchanneladder - Add verified channels\n"
         "/verifychannel - Verify channel access\n"
         "/listchannels\n"
@@ -3038,6 +3161,7 @@ def start(update, context):
         "👉 Available commands:\n"
         "/addchannel @ChannelUsername\n"
         "/addmultiplechannels @channel1,@channel2,...\n"
+        "/multipleverifiedchanneladder @channel1,@channel2,... - Add multiple verified channels\n"
         "/verifiedchanneladder - Add verified channels\n"
         "/verifychannel - Verify channel access"
         "/listchannels\n"
@@ -3110,6 +3234,7 @@ def main():
     dp.add_handler(CommandHandler("code", code))
     dp.add_handler(CommandHandler("addchannel", add_channel))
     dp.add_handler(CommandHandler("addmultiplechannels", add_multiple_channels))
+    dp.add_handler(CommandHandler("multipleverifiedchanneladder", multiple_verifiedchanneladder))
     dp.add_handler(CommandHandler("verifiedchanneladder", verified_channel_adder))
     dp.add_handler(CommandHandler("verifychannel", verify_channel))
    
