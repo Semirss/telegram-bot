@@ -2752,7 +2752,7 @@ def verification_manager_callback(update, context):
                 
             keyboard.append([InlineKeyboardButton(button_text, callback_data=f"remove_verify_{username}")])
         
-        keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="verification_manager_back")])
+        
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         query.edit_message_text(
