@@ -2716,7 +2716,7 @@ def verification_manager_callback(update, context):
         for channel in unverified_channels:
             username = channel.get("username")
             title = channel.get("title", "Unknown")
-            button_text = f"🟢 {username} - {title}"
+            button_text = f"🔴 {username} - {title}"
             
             if len(button_text) > 50:
                 button_text = button_text[:47] + "..."
