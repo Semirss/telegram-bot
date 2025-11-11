@@ -2527,8 +2527,8 @@ def remove_all_verified(update, context):
     # Confirm action
     keyboard = [
         [
-            InlineKeyboardButton("✅ Yes, remove all", callback_data="remove_all_verified_confirm"),
-            InlineKeyboardButton("❌ Cancel", callback_data="remove_all_verified_cancel")
+            InlineKeyboardButton("✅ Yes, remove all", callback_data="bulk_remove_all_verified"),
+            InlineKeyboardButton("❌ Cancel", callback_data="bulk_remove_cancel")
         ]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -2540,14 +2540,14 @@ def remove_all_verified(update, context):
         parse_mode="HTML"
     )
 
-def remove_verified_callback(update, context):
-    """Handle remove verified callback queries"""
+def bulk_remove_callback(update, context):
+    """Handle bulk remove verified callback queries"""
     query = update.callback_query
     query.answer()
     
     callback_data = query.data
     
-    if callback_data == "remove_all_verified_confirm":
+    if callback_data == "bulk_remove_all_verified":
         # Remove verified status from all channels
         result = channels_collection.update_many(
             {"isverified": True},
@@ -2565,8 +2565,110 @@ def remove_verified_callback(update, context):
             parse_mode="HTML"
         )
         
-    elif callback_data == "remove_all_verified_cancel":
+    elif callback_data == "bulk_remove_cancel":
         query.edit_message_text("❌ Operation cancelled. No changes were made.")
+@authorized
+def remove_verified(update, context):
+    """Show verified channels and allow removing verification status"""
+    # Get all verified channels
+    verified_channels = list(channels_collection.find({"isverified": True}))
+    
+    if not verified_channels:
+        update.message.reply_text("ℹ️ No verified channels found.")
+        return
+
+    # Create inline keyboard with verified channels
+    keyboard = []
+    for channel in verified_channels:
+        username = channel.get("username")
+        title = channel.get("title", "Unknown")
+        
+        button_text = f"🔴 {username} - {title}"
+        
+        # Truncate if too long
+        if len(button_text) > 50:
+            button_text = button_text[:47] + "..."
+            
+        keyboard.append([InlineKeyboardButton(button_text, callback_data=f"remove_verify_{username}")])
+
+    # Add a "Refresh" button
+    keyboard.append([InlineKeyboardButton("🔄 Refresh List", callback_data="remove_verified_refresh")])
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    update.message.reply_text(
+        "🔴 <b>Remove Verified Status</b>\n\n"
+        "Click on any channel to remove its verified status:",
+        reply_markup=reply_markup,
+        parse_mode="HTML"
+    )
+
+def remove_verified_callback(update, context):
+    """Handle remove verified callback queries"""
+    query = update.callback_query
+    query.answer()
+    
+    callback_data = query.data
+    
+    print(f"🔍 Remove verified callback received: {callback_data}")  # Debug log
+    
+    if callback_data == "remove_verified_refresh":
+        # Refresh the verified channels list
+        verified_channels = list(channels_collection.find({"isverified": True}))
+        
+        if not verified_channels:
+            query.edit_message_text("ℹ️ No verified channels found.")
+            return
+        
+        keyboard = []
+        for channel in verified_channels:
+            username = channel.get("username")
+            title = channel.get("title", "Unknown")
+            button_text = f"🔴 {username} - {title}"
+            
+            if len(button_text) > 50:
+                button_text = button_text[:47] + "..."
+                
+            keyboard.append([InlineKeyboardButton(button_text, callback_data=f"remove_verify_{username}")])
+        
+        keyboard.append([InlineKeyboardButton("🔄 Refresh List", callback_data="remove_verified_refresh")])
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        query.edit_message_text(
+            "🔴 <b>Remove Verified Status</b>\n\n"
+            "Click on any channel to remove its verified status:",
+            reply_markup=reply_markup,
+            parse_mode="HTML"
+        )
+        return
+    
+    if callback_data.startswith("remove_verify_"):
+        username = callback_data[14:]  # Remove "remove_verify_" prefix
+        
+        # Find the channel
+        channel = channels_collection.find_one({"username": username})
+        if not channel:
+            query.edit_message_text(f"❌ Channel {username} not found in database.")
+            return
+        
+        # Remove verified status
+        channels_collection.update_one(
+            {"username": username},
+            {"$set": {
+                "isverified": False,
+                "verified_at": None,
+                "verified_by": None
+            }}
+        )
+        
+        query.edit_message_text(
+            f"✅ <b>Verified status removed!</b>\n\n"
+            f"📌 <b>Channel:</b> {channel.get('title', 'Unknown')}\n"
+            f"🔗 <b>Username:</b> {username}\n"
+            f"🔴 <b>Status:</b> Not Verified\n\n"
+            f"Use /removeverified to remove verification from more channels.",
+            parse_mode="HTML"
+        )
 @authorized
 def verification_manager(update, context):
     """Enhanced verification management with more options"""
@@ -2577,9 +2679,7 @@ def verification_manager(update, context):
     
     keyboard = [
         [InlineKeyboardButton("🟢 Verify Channel", callback_data="verify_channel_list")],
-        [InlineKeyboardButton("🔴 Remove Verified Status", callback_data="remove_verified_list")],
         [InlineKeyboardButton("📊 Verification Stats", callback_data="verification_stats")],
-        [InlineKeyboardButton("🗑️ Remove All Verified", callback_data="remove_all_verified_prompt")]
     ]
     
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -3041,6 +3141,7 @@ def unknown_command(update, context):
         "/getscrapedjson - Get JSON file\n"
         "/start_24h_auto_scraping - Run 24-hour auto-scraping cycle\n"
         "/schedule_24h_auto_scraping - Schedule daily auto-scraping\n"
+        "/removeverified - Show verified channels to remove verification\n"
         "/removeverified @ChannelUsername - Remove verified status\n"  
         "/removeallverified - Remove all verified status\n"  
         "/verificationmanager - Manage verification status\n"  
@@ -3205,6 +3306,7 @@ def start(update, context):
         "/schedule_24h_auto_scraping - Schedule daily auto-scraping\n"
         "/removeverified @ChannelUsername - Remove verified status\n" 
         "/removeallverified - Remove all verified status\n" 
+        "/removeverified - Show verified channels to remove verification\n"
         "/verificationmanager - Manage verification status\n" 
         )
     else:
@@ -3288,6 +3390,7 @@ def main():
     dp.add_handler(CallbackQueryHandler(remove_verified_callback, pattern="^remove_all_verified_"))
     dp.add_handler(CallbackQueryHandler(verification_manager_callback, pattern="^verification_"))
     dp.add_handler(CallbackQueryHandler(verification_manager_callback, pattern="^remove_verify_"))
+    dp.add_handler(CallbackQueryHandler(remove_verified_callback, pattern="^remove_verify_|remove_verified_refresh"))
     dp.add_handler(CallbackQueryHandler(verification_manager_callback, pattern="^(verify_|remove_verify_|verification_stats|remove_all_verified|verification_manager)"))
     dp.add_handler(CallbackQueryHandler(remove_verified_callback, pattern="^remove_all_verified_"))
     dp.add_handler(CallbackQueryHandler(verify_channel_callback, pattern="^verify_"))
