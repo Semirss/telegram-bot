@@ -2602,6 +2602,8 @@ def verification_manager_callback(update, context):
     
     callback_data = query.data
     
+    print(f"🔍 Callback received: {callback_data}")  # Debug log
+    
     if callback_data == "verify_channel_list":
         # Show list of unverified channels to verify
         unverified_channels = list(channels_collection.find({"isverified": False}))
@@ -2619,7 +2621,7 @@ def verification_manager_callback(update, context):
             if len(button_text) > 50:
                 button_text = button_text[:47] + "..."
                 
-            keyboard.append([InlineKeyboardButton(button_text, callback_data=f"verify_manager_{username}")])
+            keyboard.append([InlineKeyboardButton(button_text, callback_data=f"verify_{username}")])
         
         keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="verification_manager_back")])
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -2628,30 +2630,6 @@ def verification_manager_callback(update, context):
             "🟢 <b>Verify Channels</b>\n\n"
             "Click on a channel to mark it as verified:",
             reply_markup=reply_markup,
-            parse_mode="HTML"
-        )
-    
-    elif callback_data.startswith("verify_manager_"):
-        username = callback_data[15:]  # Remove "verify_manager_" prefix
-        
-        # Verify the channel
-        channels_collection.update_one(
-            {"username": username},
-            {"$set": {
-                "isverified": True,
-                "verified_at": datetime.now(),
-                "verified_by": query.from_user.id
-            }}
-        )
-        
-        channel = channels_collection.find_one({"username": username})
-        
-        query.edit_message_text(
-            f"✅ <b>Channel verified successfully!</b>\n\n"
-            f"📌 <b>Channel:</b> {channel.get('title', 'Unknown')}\n"
-            f"🔗 <b>Username:</b> {username}\n"
-            f"🟢 <b>Status:</b> Verified\n\n"
-            f"Use /verificationmanager for more options.",
             parse_mode="HTML"
         )
     
@@ -2684,8 +2662,53 @@ def verification_manager_callback(update, context):
             parse_mode="HTML"
         )
     
+    elif callback_data.startswith("verify_"):
+        # Handle both verification callbacks (from verify_channel and verification_manager)
+        if callback_data == "verify_refresh":
+            # Handle refresh from the main verify_channel command
+            from . import verify_channel_callback  # Import if needed, or handle here
+            verify_channel_callback(update, context)
+            return
+            
+        username = callback_data[7:]  # Remove "verify_" prefix
+        
+        # Find the channel
+        channel = channels_collection.find_one({"username": username})
+        if not channel:
+            query.edit_message_text(f"❌ Channel {username} not found in database.")
+            return
+        
+        # Toggle verified status
+        current_status = channel.get("isverified", False)
+        new_status = not current_status
+        
+        channels_collection.update_one(
+            {"username": username},
+            {"$set": {
+                "isverified": new_status,
+                "verified_at": datetime.now() if new_status else None,
+                "verified_by": query.from_user.id if new_status else None
+            }}
+        )
+        
+        status_text = "verified ✅" if new_status else "unverified ❌"
+        query.edit_message_text(
+            f"✅ <b>Channel status updated!</b>\n\n"
+            f"📌 <b>Channel:</b> {channel.get('title', 'Unknown')}\n"
+            f"🔗 <b>Username:</b> {username}\n"
+            f"🔄 <b>Status:</b> {status_text}\n\n"
+            f"Use /verificationmanager to manage more channels.",
+            parse_mode="HTML"
+        )
+    
     elif callback_data.startswith("remove_verify_"):
         username = callback_data[14:]  # Remove "remove_verify_" prefix
+        
+        # Find the channel
+        channel = channels_collection.find_one({"username": username})
+        if not channel:
+            query.edit_message_text(f"❌ Channel {username} not found in database.")
+            return
         
         # Remove verified status
         channels_collection.update_one(
@@ -2696,8 +2719,6 @@ def verification_manager_callback(update, context):
                 "verified_by": None
             }}
         )
-        
-        channel = channels_collection.find_one({"username": username})
         
         query.edit_message_text(
             f"✅ <b>Verified status removed!</b>\n\n"
@@ -2787,7 +2808,10 @@ def verification_manager_callback(update, context):
     elif callback_data == "verification_manager_back":
         # Go back to main manager
         verification_manager(update, context)
-@authorized
+    
+    else:
+        # Handle unknown callback data
+        query.edit_message_text(f"❌ Unknown callback: {callback_data}")@authorized
 def check_verification_status(update, context):
     """Check verification status of channels and their data"""
     try:
@@ -3264,6 +3288,8 @@ def main():
     dp.add_handler(CallbackQueryHandler(remove_verified_callback, pattern="^remove_all_verified_"))
     dp.add_handler(CallbackQueryHandler(verification_manager_callback, pattern="^verification_"))
     dp.add_handler(CallbackQueryHandler(verification_manager_callback, pattern="^remove_verify_"))
+    dp.add_handler(CallbackQueryHandler(verification_manager_callback, pattern="^(verify_|remove_verify_|verification_stats|remove_all_verified|verification_manager)"))
+    dp.add_handler(CallbackQueryHandler(remove_verified_callback, pattern="^remove_all_verified_"))
     dp.add_handler(CallbackQueryHandler(verify_channel_callback, pattern="^verify_"))
     dp.add_handler(MessageHandler(Filters.command, unknown_command))
 
