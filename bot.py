@@ -2149,7 +2149,6 @@ def check_s3_status(update, context):
         
     except Exception as e:
         update.message.reply_text(f"❌ Error checking S3 status: {e}")
-
 @authorized
 def start_24h_auto_scraping(update, context):
     """Start automatic 24-hour scraping and forwarding (Bot2 functionality)"""
@@ -2167,10 +2166,15 @@ def start_24h_auto_scraping(update, context):
                     if not telethon_client:
                         return False, "❌ Could not establish connection."
                     
-                    # Get all channels from database
+                    # Get all channels from database with their verification status
                     channels = list(channels_collection.find({}))
                     if not channels:
                         return False, "❌ No channels found in database."
+                    
+                    # Create a dictionary for quick verification status lookup
+                    channel_verification_status = {}
+                    for ch in channels:
+                        channel_verification_status[ch["username"]] = ch.get("isverified", False)
                     
                     channel_usernames = [ch["username"] for ch in channels]
                     
@@ -2271,12 +2275,13 @@ def start_24h_auto_scraping(update, context):
                         target_entity = await telethon_client.get_entity(FORWARD_CHANNEL)
                         print(f"✅ Target channel: {target_entity.title}")
                         
-                        # Collect source messages from all channels
+                        # Collect source messages from all channels with verification status
                         source_messages = []
                         for channel_username in channel_usernames:
                             try:
-                                is_verified = channel_username.get("isverified", False)
                                 source_entity = await telethon_client.get_entity(channel_username)
+                                is_verified = channel_verification_status.get(channel_username, False)
+                                
                                 async for message in telethon_client.iter_messages(source_entity, limit=None):
                                     if not message.text:
                                         continue
@@ -2286,16 +2291,23 @@ def start_24h_auto_scraping(update, context):
                                         'text': message.text,
                                         'date': message.date,
                                         'source_channel': channel_username,
-                                        'source_message_id': message.id
+                                        'source_message_id': message.id,
+                                        'is_verified': is_verified  # Include verification status here
                                     })
                             except Exception as e:
                                 print(f"❌ Error collecting from {channel_username}: {e}")
                                 continue
                         
+                        # Load existing data to check for updates
+                        existing_data = load_scraped_data_from_s3()
+                        existing_refs = {item['product_ref'] for item in existing_data}
+                        
                         # Scan target channel for matches
                         scraped_data = []
                         used_source_ids = set()
                         used_target_ids = set()
+                        updated_items = 0
+                        new_items = 0
                         
                         async for target_message in telethon_client.iter_messages(target_entity, limit=None):
                             if not target_message.text:
@@ -2341,6 +2353,12 @@ def start_24h_auto_scraping(update, context):
                                     internal_id = internal_id[4:]
                                 post_link = f"https://t.me/c/{internal_id}/{target_message.id}"
                             
+                            # Use the verification status from the source message
+                            is_verified = matching_source.get('is_verified', False)
+                            
+                            product_ref = str(target_message.id)
+                            is_new_item = product_ref not in existing_refs
+                            
                             post_data = {
                                 "title": info["title"],
                                 "description": info["description"],
@@ -2350,45 +2368,85 @@ def start_24h_auto_scraping(update, context):
                                 "date": target_message.date.strftime("%Y-%m-%d %H:%M:%S"),
                                 "channel": matching_source['source_channel'],
                                 "post_link": post_link,
-                                "product_ref": str(target_message.id),
+                                "product_ref": product_ref,
                                 "scraped_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                                 "predicted_category": predicted_category,
                                 "generated_description": generated_description,
                                 "ai_enhanced": True,
                                 "source_message_id": matching_source['source_message_id'],
                                 "target_message_id": target_message.id,
-                                "channel_verified": is_verified 
+                                "channel_verified": is_verified  # This should now be correctly set
                             }
-                            scraped_data.append(post_data)
+                            
+                            if is_new_item:
+                                new_items += 1
+                                scraped_data.append(post_data)
+                                print(f"🆕 New item found: {product_ref}")
+                            else:
+                                # Update existing item with new AI enhancement and verification status
+                                updated_items += 1
+                                # Find and update the existing item
+                                for i, existing_item in enumerate(existing_data):
+                                    if existing_item['product_ref'] == product_ref:
+                                        # Update AI-enhanced fields and verification status
+                                        existing_data[i].update({
+                                            "predicted_category": predicted_category,
+                                            "generated_description": generated_description,
+                                            "ai_enhanced": True,
+                                            "channel_verified": is_verified,
+                                            "scraped_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                                        })
+                                        print(f"🔄 Updated existing item: {product_ref}")
+                                        break
                         
-                        # Save to S3
-                        existing_data = load_scraped_data_from_s3()
-                        existing_refs = {item['product_ref'] for item in existing_data}
-                        new_items = [item for item in scraped_data if item['product_ref'] not in existing_refs]
-                        
-                        if new_items:
-                            combined_data = existing_data + new_items
+                        # Combine new items with updated existing data
+                        if scraped_data or updated_items > 0:
+                            # For new items, add to existing data
+                            if scraped_data:
+                                combined_data = existing_data + scraped_data
+                            else:
+                                combined_data = existing_data
+                            
                             success = save_scraped_data_to_s3(combined_data)
                             
                             if success:
-                                # Print AI summary
+                                # Print comprehensive summary
                                 category_counts = {}
-                                for item in new_items:
+                                verified_count = 0
+                                total_processed = len(scraped_data) + updated_items
+                                
+                                # Count categories for new items
+                                for item in scraped_data:
                                     category = item.get('predicted_category', 'Unknown')
                                     category_counts[category] = category_counts.get(category, 0) + 1
+                                    if item.get('channel_verified', False):
+                                        verified_count += 1
+                                
+                                # Count categories for updated items (approximate)
+                                for item in existing_data[:updated_items]:  # Just sample some updated items
+                                    category = item.get('predicted_category', 'Unknown')
+                                    category_counts[category] = category_counts.get(category, 0) + 1
+                                    if item.get('channel_verified', False):
+                                        verified_count += 1
                                 
                                 summary_msg = f"✅ 24-hour cycle completed!\n\n"
                                 summary_msg += f"📤 Forwarded: {total_forwarded} messages\n"
-                                summary_msg += f"🤖 AI-Enhanced: {len(new_items)} new products\n\n"
-                                summary_msg += f"📊 New Categories:\n"
-                                for category, count in category_counts.items():
-                                    summary_msg += f"• {category}: {count}\n"
+                                summary_msg += f"🤖 AI Processing:\n"
+                                summary_msg += f"   • New items: {new_items}\n"
+                                summary_msg += f"   • Updated items: {updated_items}\n"
+                                summary_msg += f"   • From verified channels: {verified_count}\n"
+                                summary_msg += f"   • Total processed: {total_processed}\n\n"
+                                
+                                if category_counts:
+                                    summary_msg += f"📊 Categories:\n"
+                                    for category, count in list(category_counts.items())[:5]:  # Top 5 categories
+                                        summary_msg += f"• {category}: {count}\n"
                                 
                                 return True, summary_msg
                             else:
                                 return False, "❌ Failed to save AI-enhanced data to S3."
                         else:
-                            return True, f"✅ 24-hour cycle completed!\n\n📤 Forwarded: {total_forwarded} messages\n🤖 No new products to AI-enhance."
+                            return True, f"✅ 24-hour cycle completed!\n\n📤 Forwarded: {total_forwarded} messages\n🤖 No new or updated products to AI-enhance."
                             
                     except Exception as e:
                         return False, f"❌ Scraping error: {str(e)}"
@@ -2419,7 +2477,230 @@ def start_24h_auto_scraping(update, context):
             context.bot.send_message(update.effective_chat.id, text=f"❌ Error in auto-scraping: {e}")
     
     threading.Thread(target=run_auto_scraping, daemon=True).start()
-    update.message.reply_text("🚀 Starting 24-hour auto-scraping cycle in background...")
+    update.message.reply_text("🚀 Starting 24-hour auto-scraping cycle in background...")@authorized
+def remove_verified(update, context):
+    """Remove verified status from a channel"""
+    if len(context.args) == 0:
+        update.message.reply_text(
+            "⚡ Usage: /removeverified @ChannelUsername\n\n"
+            "This will remove the verified status from the specified channel."
+        )
+        return
+
+    username = context.args[0].strip()
+    if not username.startswith("@"):
+        update.message.reply_text("❌ Please provide a valid channel username starting with @")
+        return
+
+    # Find the channel
+    channel = channels_collection.find_one({"username": username})
+    if not channel:
+        update.message.reply_text(f"❌ Channel {username} not found in database.")
+        return
+
+    # Check if already not verified
+    if not channel.get("isverified", False):
+        update.message.reply_text(f"ℹ️ Channel {username} is already not verified.")
+        return
+
+    # Remove verified status
+    channels_collection.update_one(
+        {"username": username},
+        {"$set": {
+            "isverified": False,
+            "verified_at": None,
+            "verified_by": None
+        }}
+    )
+
+    update.message.reply_text(
+        f"✅ <b>Verified status removed!</b>\n\n"
+        f"📌 <b>Channel:</b> {channel.get('title', 'Unknown')}\n"
+        f"🔗 <b>Username:</b> {username}\n"
+        f"🔴 <b>Status:</b> Not Verified\n\n"
+        f"Use /verifychannel to manage verification status.",
+        parse_mode="HTML"
+    )
+@authorized
+def remove_all_verified(update, context):
+    """Remove verified status from all channels"""
+    # Confirm action
+    keyboard = [
+        [
+            InlineKeyboardButton("✅ Yes, remove all", callback_data="remove_all_verified_confirm"),
+            InlineKeyboardButton("❌ Cancel", callback_data="remove_all_verified_cancel")
+        ]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    update.message.reply_text(
+        "⚠️ <b>Are you sure you want to remove verified status from ALL channels?</b>\n\n"
+        "This action cannot be undone!",
+        reply_markup=reply_markup,
+        parse_mode="HTML"
+    )
+
+def remove_verified_callback(update, context):
+    """Handle remove verified callback queries"""
+    query = update.callback_query
+    query.answer()
+    
+    callback_data = query.data
+    
+    if callback_data == "remove_all_verified_confirm":
+        # Remove verified status from all channels
+        result = channels_collection.update_many(
+            {"isverified": True},
+            {"$set": {
+                "isverified": False,
+                "verified_at": None,
+                "verified_by": None
+            }}
+        )
+        
+        query.edit_message_text(
+            f"✅ <b>Verified status removed from all channels!</b>\n\n"
+            f"📊 <b>Channels affected:</b> {result.modified_count}\n\n"
+            f"All channels are now unverified.",
+            parse_mode="HTML"
+        )
+        
+    elif callback_data == "remove_all_verified_cancel":
+        query.edit_message_text("❌ Operation cancelled. No changes were made.")
+@authorized
+def verification_manager(update, context):
+    """Enhanced verification management with more options"""
+    # Get verification statistics
+    total_channels = channels_collection.count_documents({})
+    verified_channels = channels_collection.count_documents({"isverified": True})
+    unverified_channels = total_channels - verified_channels
+    
+    keyboard = [
+        [InlineKeyboardButton("🟢 Verify Channel", callback_data="verify_channel_list")],
+        [InlineKeyboardButton("🔴 Remove Verified Status", callback_data="remove_verified_list")],
+        [InlineKeyboardButton("📊 Verification Stats", callback_data="verification_stats")],
+        [InlineKeyboardButton("🗑️ Remove All Verified", callback_data="remove_all_verified_prompt")]
+    ]
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    update.message.reply_text(
+        f"🔧 <b>Verification Manager</b>\n\n"
+        f"📊 <b>Current Status:</b>\n"
+        f"• Total Channels: {total_channels}\n"
+        f"• Verified: {verified_channels}\n"
+        f"• Not Verified: {unverified_channels}\n\n"
+        f"Choose an action:",
+        reply_markup=reply_markup,
+        parse_mode="HTML"
+    )
+
+def verification_manager_callback(update, context):
+    """Handle verification manager callbacks"""
+    query = update.callback_query
+    query.answer()
+    
+    callback_data = query.data
+    
+    if callback_data == "remove_verified_list":
+        # Show list of verified channels to remove
+        verified_channels = list(channels_collection.find({"isverified": True}))
+        
+        if not verified_channels:
+            query.edit_message_text("ℹ️ No verified channels found.")
+            return
+        
+        keyboard = []
+        for channel in verified_channels:
+            username = channel.get("username")
+            title = channel.get("title", "Unknown")
+            button_text = f"🔴 {username} - {title}"
+            
+            if len(button_text) > 50:
+                button_text = button_text[:47] + "..."
+                
+            keyboard.append([InlineKeyboardButton(button_text, callback_data=f"remove_verify_{username}")])
+        
+        keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="verification_manager_back")])
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        query.edit_message_text(
+            "🔴 <b>Remove Verified Status</b>\n\n"
+            "Click on a channel to remove its verified status:",
+            reply_markup=reply_markup,
+            parse_mode="HTML"
+        )
+    
+    elif callback_data.startswith("remove_verify_"):
+        username = callback_data[14:]  # Remove "remove_verify_" prefix
+        
+        # Remove verified status
+        channels_collection.update_one(
+            {"username": username},
+            {"$set": {
+                "isverified": False,
+                "verified_at": None,
+                "verified_by": None
+            }}
+        )
+        
+        query.edit_message_text(
+            f"✅ <b>Verified status removed!</b>\n\n"
+            f"🔗 <b>Channel:</b> {username}\n"
+            f"🔴 <b>Status:</b> Not Verified\n\n"
+            f"Use /verificationmanager for more options.",
+            parse_mode="HTML"
+        )
+    
+    elif callback_data == "verification_stats":
+        # Show detailed statistics
+        total_channels = channels_collection.count_documents({})
+        verified_channels = channels_collection.count_documents({"isverified": True})
+        unverified_channels = total_channels - verified_channels
+        
+        # Get recently verified channels
+        recent_verified = list(channels_collection.find(
+            {"isverified": True, "verified_at": {"$ne": None}}
+        ).sort("verified_at", -1).limit(5))
+        
+        stats_msg = f"📊 <b>Verification Statistics</b>\n\n"
+        stats_msg += f"• Total Channels: {total_channels}\n"
+        stats_msg += f"• Verified: {verified_channels}\n"
+        stats_msg += f"• Not Verified: {unverified_channels}\n"
+        stats_msg += f"• Verification Rate: {(verified_channels/total_channels*100) if total_channels > 0 else 0:.1f}%\n\n"
+        
+        if recent_verified:
+            stats_msg += f"🕒 <b>Recently Verified:</b>\n"
+            for channel in recent_verified:
+                verified_time = channel.get('verified_at', datetime.now()).strftime("%Y-%m-%d %H:%M")
+                stats_msg += f"• {channel.get('username')} - {verified_time}\n"
+        
+        query.edit_message_text(stats_msg, parse_mode="HTML")
+    
+    elif callback_data == "remove_all_verified_prompt":
+        # Confirm bulk removal
+        keyboard = [
+            [
+                InlineKeyboardButton("✅ Yes, remove all", callback_data="remove_all_verified_confirm"),
+                InlineKeyboardButton("❌ Cancel", callback_data="verification_manager_back")
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        verified_count = channels_collection.count_documents({"isverified": True})
+        
+        query.edit_message_text(
+            f"⚠️ <b>Confirm Bulk Removal</b>\n\n"
+            f"You are about to remove verified status from <b>{verified_count} channels</b>.\n\n"
+            f"❌ This action cannot be undone!\n\n"
+            f"Are you sure?",
+            reply_markup=reply_markup,
+            parse_mode="HTML"
+        )
+    
+    elif callback_data == "verification_manager_back":
+        # Go back to main manager
+        verification_manager(update, context)
 @authorized
 def check_verification_status(update, context):
     """Check verification status of channels and their data"""
@@ -2527,6 +2808,9 @@ def unknown_command(update, context):
         "/getscrapedjson - Get JSON file\n"
         "/start_24h_auto_scraping - Run 24-hour auto-scraping cycle\n"
         "/schedule_24h_auto_scraping - Schedule daily auto-scraping\n"
+        "/removeverified @ChannelUsername - Remove verified status\n"  
+        "/removeallverified - Remove all verified status\n"  
+        "/verificationmanager - Manage verification status\n"  
     )
 
 @authorized
@@ -2685,6 +2969,9 @@ def start(update, context):
         "/getscrapedjson - Get JSON file\n"
         "/start_24h_auto_scraping - Run 24-hour auto-scraping cycle\n"
         "/schedule_24h_auto_scraping - Schedule daily auto-scraping\n"
+        "/removeverified @ChannelUsername - Remove verified status\n" 
+        "/removeallverified - Remove all verified status\n" 
+        "/verificationmanager - Manage verification status\n" 
         )
     else:
         update.message.reply_text(
@@ -2760,6 +3047,12 @@ def main():
     dp.add_handler(CommandHandler("start_24h_auto_scraping", start_24h_auto_scraping))
     dp.add_handler(CommandHandler("schedule_24h_auto_scraping", schedule_24h_auto_scraping))
     dp.add_handler(CommandHandler("checkverification", check_verification_status))
+    dp.add_handler(CommandHandler("removeverified", remove_verified))
+    dp.add_handler(CommandHandler("removeallverified", remove_all_verified))
+    dp.add_handler(CommandHandler("verificationmanager", verification_manager))
+    dp.add_handler(CallbackQueryHandler(remove_verified_callback, pattern="^remove_all_verified_"))
+    dp.add_handler(CallbackQueryHandler(verification_manager_callback, pattern="^verification_"))
+    dp.add_handler(CallbackQueryHandler(verification_manager_callback, pattern="^remove_verify_"))
     dp.add_handler(CallbackQueryHandler(verify_channel_callback, pattern="^verify_"))
     dp.add_handler(MessageHandler(Filters.command, unknown_command))
 
