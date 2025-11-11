@@ -2602,7 +2602,60 @@ def verification_manager_callback(update, context):
     
     callback_data = query.data
     
-    if callback_data == "remove_verified_list":
+    if callback_data == "verify_channel_list":
+        # Show list of unverified channels to verify
+        unverified_channels = list(channels_collection.find({"isverified": False}))
+        
+        if not unverified_channels:
+            query.edit_message_text("ℹ️ All channels are already verified.")
+            return
+        
+        keyboard = []
+        for channel in unverified_channels:
+            username = channel.get("username")
+            title = channel.get("title", "Unknown")
+            button_text = f"🟢 {username} - {title}"
+            
+            if len(button_text) > 50:
+                button_text = button_text[:47] + "..."
+                
+            keyboard.append([InlineKeyboardButton(button_text, callback_data=f"verify_manager_{username}")])
+        
+        keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="verification_manager_back")])
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        query.edit_message_text(
+            "🟢 <b>Verify Channels</b>\n\n"
+            "Click on a channel to mark it as verified:",
+            reply_markup=reply_markup,
+            parse_mode="HTML"
+        )
+    
+    elif callback_data.startswith("verify_manager_"):
+        username = callback_data[15:]  # Remove "verify_manager_" prefix
+        
+        # Verify the channel
+        channels_collection.update_one(
+            {"username": username},
+            {"$set": {
+                "isverified": True,
+                "verified_at": datetime.now(),
+                "verified_by": query.from_user.id
+            }}
+        )
+        
+        channel = channels_collection.find_one({"username": username})
+        
+        query.edit_message_text(
+            f"✅ <b>Channel verified successfully!</b>\n\n"
+            f"📌 <b>Channel:</b> {channel.get('title', 'Unknown')}\n"
+            f"🔗 <b>Username:</b> {username}\n"
+            f"🟢 <b>Status:</b> Verified\n\n"
+            f"Use /verificationmanager for more options.",
+            parse_mode="HTML"
+        )
+    
+    elif callback_data == "remove_verified_list":
         # Show list of verified channels to remove
         verified_channels = list(channels_collection.find({"isverified": True}))
         
@@ -2644,9 +2697,12 @@ def verification_manager_callback(update, context):
             }}
         )
         
+        channel = channels_collection.find_one({"username": username})
+        
         query.edit_message_text(
             f"✅ <b>Verified status removed!</b>\n\n"
-            f"🔗 <b>Channel:</b> {username}\n"
+            f"📌 <b>Channel:</b> {channel.get('title', 'Unknown')}\n"
+            f"🔗 <b>Username:</b> {username}\n"
             f"🔴 <b>Status:</b> Not Verified\n\n"
             f"Use /verificationmanager for more options.",
             parse_mode="HTML"
@@ -2663,6 +2719,11 @@ def verification_manager_callback(update, context):
             {"isverified": True, "verified_at": {"$ne": None}}
         ).sort("verified_at", -1).limit(5))
         
+        # Get recently unverified channels
+        recent_unverified = list(channels_collection.find(
+            {"isverified": False, "verified_at": {"$ne": None}}
+        ).sort("verified_at", -1).limit(5))
+        
         stats_msg = f"📊 <b>Verification Statistics</b>\n\n"
         stats_msg += f"• Total Channels: {total_channels}\n"
         stats_msg += f"• Verified: {verified_channels}\n"
@@ -2674,6 +2735,13 @@ def verification_manager_callback(update, context):
             for channel in recent_verified:
                 verified_time = channel.get('verified_at', datetime.now()).strftime("%Y-%m-%d %H:%M")
                 stats_msg += f"• {channel.get('username')} - {verified_time}\n"
+            stats_msg += "\n"
+        
+        if recent_unverified:
+            stats_msg += f"🕒 <b>Recently Unverified:</b>\n"
+            for channel in recent_unverified:
+                unverified_time = channel.get('verified_at', datetime.now()).strftime("%Y-%m-%d %H:%M")
+                stats_msg += f"• {channel.get('username')} - {unverified_time}\n"
         
         query.edit_message_text(stats_msg, parse_mode="HTML")
     
@@ -2695,6 +2763,24 @@ def verification_manager_callback(update, context):
             f"❌ This action cannot be undone!\n\n"
             f"Are you sure?",
             reply_markup=reply_markup,
+            parse_mode="HTML"
+        )
+    
+    elif callback_data == "remove_all_verified_confirm":
+        # Remove verified status from all channels
+        result = channels_collection.update_many(
+            {"isverified": True},
+            {"$set": {
+                "isverified": False,
+                "verified_at": None,
+                "verified_by": None
+            }}
+        )
+        
+        query.edit_message_text(
+            f"✅ <b>Verified status removed from all channels!</b>\n\n"
+            f"📊 <b>Channels affected:</b> {result.modified_count}\n\n"
+            f"All channels are now unverified.",
             parse_mode="HTML"
         )
     
