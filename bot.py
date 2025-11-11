@@ -27,6 +27,8 @@ import speedtest
 from telegram import Bot
 from telegram.error import BadRequest, Conflict  
 import schedule 
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import CallbackQueryHandler
 app = Flask(__name__)
 
 @app.route("/")
@@ -920,6 +922,191 @@ def setup_session(update, context):
     threading.Thread(target=run_session_setup, daemon=True).start()
 
 @authorized
+def verified_channel_adder(update, context):
+    """Add a channel and mark it as verified immediately"""
+    if len(context.args) == 0:
+        update.message.reply_text(
+            "⚡ Usage: /verifiedchanneladder @ChannelUsername\n\n"
+            "This will add the channel and mark it as verified immediately."
+        )
+        return
+
+    username = context.args[0].strip()
+    if not username.startswith("@"):
+        update.message.reply_text("❌ Please provide a valid channel username starting with @")
+        return
+
+    # Check if channel already exists
+    existing_channel = channels_collection.find_one({"username": username})
+    if existing_channel:
+        # Update existing channel to verified
+        channels_collection.update_one(
+            {"username": username},
+            {"$set": {"isverified": True}}
+        )
+        update.message.reply_text(
+            f"✅ <b>Channel verified successfully!</b>\n\n"
+            f"📌 <b>Name:</b> {existing_channel.get('title', 'Unknown')}\n"
+            f"🔗 <b>Username:</b> {username}\n"
+            f"🟢 <b>Status:</b> Verified",
+            parse_mode="HTML",
+        )
+    else:
+        # Add new channel as verified
+        try:
+            chat = context.bot.get_chat(username)
+            channels_collection.insert_one({
+                "username": username, 
+                "title": chat.title,
+                "isverified": True,
+                "verified_at": datetime.now(),
+                "verified_by": update.effective_user.id
+            })
+            update.message.reply_text(
+                f"✅ <b>Verified channel added successfully!</b>\n\n"
+                f"📌 <b>Name:</b> {chat.title}\n"
+                f"🔗 <b>Username:</b> {username}\n"
+                f"🟢 <b>Status:</b> Verified",
+                parse_mode="HTML",
+            )
+        except BadRequest as e:
+            update.message.reply_text(f"❌ Could not add channel: {str(e)}")
+            return
+        except Exception as e:
+            update.message.reply_text(f"❌ Unexpected error: {str(e)}")
+            return
+
+    # Run operations for verified channel
+    def run_operations():
+        try:
+            # Forward messages
+            update.message.reply_text(f"⏳ Forwarding last 7d posts from verified channel {username}...")
+            success, result_msg = forward_last_7d_sync(username)
+            context.bot.send_message(update.effective_chat.id, text=result_msg, parse_mode="HTML")
+            
+            # Add delay to ensure forwarding completes
+            import time
+            time.sleep(3)
+            
+            # Scrape data
+            update.message.reply_text(f"⏳ Starting 7-day data scraping from verified channel {username}...")
+            success, result_msg = scrape_channel_7days_sync(username)
+            context.bot.send_message(update.effective_chat.id, text=result_msg, parse_mode="HTML")
+            
+        except Exception as e:
+            error_msg = f"❌ Error during operations for verified channel: {str(e)}"
+            context.bot.send_message(update.effective_chat.id, text=error_msg, parse_mode="HTML")
+
+    threading.Thread(target=run_operations, daemon=True).start()
+
+@authorized
+def verify_channel(update, context):
+    """Show available channels and allow toggling verified status"""
+    # Get all channels from database
+    channels = list(channels_collection.find({}))
+    
+    if not channels:
+        update.message.reply_text("📭 No channels saved yet. Use /addchannel first.")
+        return
+
+    # Create inline keyboard with channels
+    keyboard = []
+    for channel in channels:
+        username = channel.get("username")
+        title = channel.get("title", "Unknown")
+        is_verified = channel.get("isverified", False)
+        
+        status_icon = "🟢" if is_verified else "🔴"
+        button_text = f"{status_icon} {username} - {title}"
+        
+        # Truncate if too long
+        if len(button_text) > 50:
+            button_text = button_text[:47] + "..."
+            
+        keyboard.append([InlineKeyboardButton(button_text, callback_data=f"verify_{username}")])
+
+    # Add a "Refresh" button
+    keyboard.append([InlineKeyboardButton("🔄 Refresh List", callback_data="verify_refresh")])
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    update.message.reply_text(
+        "🔍 <b>Channel Verification Manager</b>\n\n"
+        "🟢 = Verified | 🔴 = Not Verified\n\n"
+        "Click on any channel to toggle its verified status:",
+        reply_markup=reply_markup,
+        parse_mode="HTML"
+    )
+
+def verify_channel_callback(update, context):
+    """Handle channel verification callback queries"""
+    query = update.callback_query
+    query.answer()
+    
+    callback_data = query.data
+    
+    if callback_data == "verify_refresh":
+        # Refresh the channel list
+        channels = list(channels_collection.find({}))
+        keyboard = []
+        for channel in channels:
+            username = channel.get("username")
+            title = channel.get("title", "Unknown")
+            is_verified = channel.get("isverified", False)
+            
+            status_icon = "🟢" if is_verified else "🔴"
+            button_text = f"{status_icon} {username} - {title}"
+            
+            if len(button_text) > 50:
+                button_text = button_text[:47] + "..."
+                
+            keyboard.append([InlineKeyboardButton(button_text, callback_data=f"verify_{username}")])
+        
+        keyboard.append([InlineKeyboardButton("🔄 Refresh List", callback_data="verify_refresh")])
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        query.edit_message_text(
+            "🔍 <b>Channel Verification Manager</b>\n\n"
+            "🟢 = Verified | 🔴 = Not Verified\n\n"
+            "Click on any channel to toggle its verified status:",
+            reply_markup=reply_markup,
+            parse_mode="HTML"
+        )
+        return
+    
+    if callback_data.startswith("verify_"):
+        username = callback_data[7:]  # Remove "verify_" prefix
+        
+        # Find the channel
+        channel = channels_collection.find_one({"username": username})
+        if not channel:
+            query.edit_message_text(f"❌ Channel {username} not found in database.")
+            return
+        
+        # Toggle verified status
+        current_status = channel.get("isverified", False)
+        new_status = not current_status
+        
+        channels_collection.update_one(
+            {"username": username},
+            {"$set": {
+                "isverified": new_status,
+                "verified_at": datetime.now() if new_status else None,
+                "verified_by": query.from_user.id if new_status else None
+            }}
+        )
+        
+        status_text = "verified ✅" if new_status else "unverified ❌"
+        query.edit_message_text(
+            f"✅ <b>Channel status updated!</b>\n\n"
+            f"📌 <b>Channel:</b> {channel.get('title', 'Unknown')}\n"
+            f"🔗 <b>Username:</b> {username}\n"
+            f"🔄 <b>Status:</b> {status_text}\n\n"
+            f"Use /verifychannel to manage more channels.",
+            parse_mode="HTML"
+        )
+
+@authorized
 def debug_json_comprehensive(update, context):
     """Comprehensive debug command to check S3 JSON files"""
     try:
@@ -1074,6 +1261,9 @@ async def scrape_channel_7days_async(channel_username: str):
             return False, "❌ Could not establish connection for scraping."
         
         print(f"🔍 Starting 7-day scrape for channel: {channel_username}")
+        channel_data = channels_collection.find_one({"username": channel_username})
+        is_verified = channel_data.get("isverified", False) if channel_data else False
+        
         
         try:
             # Get the SOURCE channel entity (where we scrape FROM)
@@ -1219,7 +1409,8 @@ async def scrape_channel_7days_async(channel_username: str):
                 "has_media": bool(target_message.media),
                 "has_text": bool(target_message.text),
                 "source_message_id": matching_source['source_message_id'],  # Original source ID
-                "target_message_id": target_message.id   # Actual target channel ID
+                "target_message_id": target_message.id,   # Actual target channel ID
+                "channel_verified": is_verified
             }
             scraped_data.append(post_data)
         
@@ -1358,7 +1549,6 @@ def add_channel(update, context):
                 context.bot.send_message(update.effective_chat.id, text=error_msg, parse_mode="HTML")
 
         threading.Thread(target=run_operations, daemon=True).start()
-
     except BadRequest as e:
         update.message.reply_text(f"❌ Could not add channel: {str(e)}")
     except Exception as e:
@@ -1824,11 +2014,18 @@ def list_channels(update, context):
     for ch in channels:
         username = ch.get("username")
         title = ch.get("title", "Unknown")
-        msg_lines.append(f"{username} — <b>{title}</b>")
+        is_verified = ch.get("isverified", False)
+        status_icon = "🟢" if is_verified else "🔴"
+        msg_lines.append(f"{status_icon} {username} — <b>{title}</b>")
 
     msg = "\n".join(msg_lines)
     for chunk in [msg[i : i + 4000] for i in range(0, len(msg), 4000)]:
         update.message.reply_text(chunk, parse_mode="HTML")
+
+# Add this function to get only verified channels for your updates
+def get_verified_channels():
+    """Get all verified channels"""
+    return list(channels_collection.find({"isverified": True}))
 
 @authorized
 def check_channel(update, context):
@@ -2078,6 +2275,7 @@ def start_24h_auto_scraping(update, context):
                         source_messages = []
                         for channel_username in channel_usernames:
                             try:
+                                is_verified = channel_username.get("isverified", False)
                                 source_entity = await telethon_client.get_entity(channel_username)
                                 async for message in telethon_client.iter_messages(source_entity, limit=None):
                                     if not message.text:
@@ -2158,7 +2356,8 @@ def start_24h_auto_scraping(update, context):
                                 "generated_description": generated_description,
                                 "ai_enhanced": True,
                                 "source_message_id": matching_source['source_message_id'],
-                                "target_message_id": target_message.id
+                                "target_message_id": target_message.id,
+                                "channel_verified": is_verified 
                             }
                             scraped_data.append(post_data)
                         
@@ -2221,6 +2420,48 @@ def start_24h_auto_scraping(update, context):
     
     threading.Thread(target=run_auto_scraping, daemon=True).start()
     update.message.reply_text("🚀 Starting 24-hour auto-scraping cycle in background...")
+@authorized
+def check_verification_status(update, context):
+    """Check verification status of channels and their data"""
+    try:
+        # Get all channels from MongoDB
+        channels = list(channels_collection.find({}))
+        
+        # Get scraped data from S3
+        scraped_data = load_scraped_data_from_s3()
+        
+        msg = "🔍 <b>Channel Verification Status Report</b>\n\n"
+        
+        msg += "<b>MongoDB Channels:</b>\n"
+        verified_count = 0
+        for channel in channels:
+            username = channel.get("username")
+            is_verified = channel.get("isverified", False)
+            status = "🟢 Verified" if is_verified else "🔴 Not Verified"
+            if is_verified:
+                verified_count += 1
+            msg += f"• {username}: {status}\n"
+        
+        msg += f"\n<b>Summary:</b> {verified_count}/{len(channels)} channels verified\n\n"
+        
+        if scraped_data:
+            # Count verified channels in scraped data
+            verified_in_json = sum(1 for item in scraped_data if item.get('channel_verified', False))
+            total_in_json = len(scraped_data)
+            
+            msg += f"<b>Scraped Data:</b>\n"
+            msg += f"• Total records: {total_in_json}\n"
+            msg += f"• From verified channels: {verified_in_json}\n"
+            msg += f"• From unverified channels: {total_in_json - verified_in_json}\n"
+        else:
+            msg += "<b>Scraped Data:</b> No data found\n"
+        
+        update.message.reply_text(msg, parse_mode="HTML")
+        
+    except Exception as e:
+        update.message.reply_text(f"❌ Error checking verification status: {e}")
+
+
 
 @authorized  
 def schedule_24h_auto_scraping(update, context):
@@ -2492,6 +2733,9 @@ def main():
     dp.add_handler(CommandHandler("code", code))
     dp.add_handler(CommandHandler("addchannel", add_channel))
     dp.add_handler(CommandHandler("addmultiplechannels", add_multiple_channels))
+    dp.add_handler(CommandHandler("verifiedchanneladder", verified_channel_adder))
+    dp.add_handler(CommandHandler("verifychannel", verify_channel))
+   
     dp.add_handler(CommandHandler("optimizationchecker", optimization_checker))
     dp.add_handler(CommandHandler("listchannels", list_channels))
     dp.add_handler(CommandHandler("checkchannel", check_channel))
@@ -2511,6 +2755,8 @@ def main():
     dp.add_handler(CommandHandler("debug_json_comprehensive", debug_json_comprehensive))
     dp.add_handler(CommandHandler("start_24h_auto_scraping", start_24h_auto_scraping))
     dp.add_handler(CommandHandler("schedule_24h_auto_scraping", schedule_24h_auto_scraping))
+    dp.add_handler(CommandHandler("checkverification", check_verification_status))
+    dp.add_handler(CallbackQueryHandler(verify_channel_callback, pattern="^verify_"))
     dp.add_handler(MessageHandler(Filters.command, unknown_command))
 
     print(f"🤖 Bot is running...")
