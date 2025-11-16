@@ -3789,126 +3789,113 @@ def code(update, context):
     else:
         update.message.reply_text("❌ Invalid code. Access denied.")
 
-
-# Main (S3 ONLY) - FIXED VERSION
+# ======================
+# Main (S3 ONLY)
 # ======================
 def main():
+    # Start Flask thread
+    threading.Thread(target=run_flask, daemon=True).start()
+    
+    from telegram.utils.request import Request
+    from telegram.error import Conflict
+    
+    # ✅ FIX: Create Bot with Request instead of passing to Updater
+    request = Request(connect_timeout=30, read_timeout=30, con_pool_size=8)
+    bot = Bot(token=BOT_TOKEN, request=request)
+    
+    # ✅ FIX: Pass bot to Updater instead of token
+    updater = Updater(bot=bot, use_context=True)
+    dp = updater.dispatcher
+    
+    # Add error handler
+    dp.add_error_handler(error_handler)
+   
+    # All your existing handlers
+    dp.add_handler(CommandHandler("start", start))
+    dp.add_handler(CommandHandler("code", code))
+    dp.add_handler(CommandHandler("addchannel", add_channel))
+    dp.add_handler(CommandHandler("addmultiplechannels", add_multiple_channels))
+    dp.add_handler(CommandHandler("multipleverifiedchanneladder", multiple_verifiedchanneladder))
+    dp.add_handler(CommandHandler("verifiedchanneladder", verified_channel_adder))
+    dp.add_handler(CommandHandler("verifychannel", verify_channel))
+    dp.add_handler(CommandHandler("optimizationchecker", optimization_checker))
+    dp.add_handler(CommandHandler("listchannels", list_channels))
+    dp.add_handler(CommandHandler("checkchannel", check_channel))
+    dp.add_handler(CommandHandler("deletechannel", delete_channel))
+    dp.add_handler(CommandHandler("check_session", check_session))
+    dp.add_handler(CommandHandler("checksessionusage", check_session_usage))
+    dp.add_handler(CommandHandler("test", test_connection))
+    dp.add_handler(CommandHandler("check_data", check_scraped_data))
+    dp.add_handler(CommandHandler("check_s3", check_s3_status))
+    dp.add_handler(CommandHandler("diagnose", diagnose_session))
+    dp.add_handler(CommandHandler("debug_json", debug_s3_json))
+    dp.add_handler(CommandHandler("deletes3files", delete_s3_files))
+    dp.add_handler(CommandHandler("getscrapedjson", get_scraped_json))
+    dp.add_handler(CommandHandler("debug_json_comprehensive", debug_json_comprehensive))
+    dp.add_handler(CommandHandler("start_24h_auto_scraping", start_24h_auto_scraping))
+    dp.add_handler(CommandHandler("schedule_24h_auto_scraping", schedule_24h_auto_scraping))
+    dp.add_handler(CommandHandler("checkverification", check_verification_status))
+    dp.add_handler(CommandHandler("removeverified", remove_verified))
+    dp.add_handler(CommandHandler("removeallverified", remove_all_verified))
+    dp.add_handler(CommandHandler("verificationmanager", verification_manager))
+    dp.add_handler(CommandHandler("rescrapechannel", rescrape_channel))
+    dp.add_handler(CallbackQueryHandler(remove_verified_callback, pattern="^remove_all_verified_"))
+    dp.add_handler(CallbackQueryHandler(verification_manager_callback, pattern="^verification_"))
+    dp.add_handler(CallbackQueryHandler(verification_manager_callback, pattern="^remove_verify_"))
+    dp.add_handler(CallbackQueryHandler(remove_verified_callback, pattern="^remove_verify_|remove_verified_refresh"))
+    dp.add_handler(CallbackQueryHandler(verification_manager_callback, pattern="^(verify_|remove_verify_|verification_stats|remove_all_verified|verification_manager)"))
+    dp.add_handler(CallbackQueryHandler(remove_verified_callback, pattern="^remove_all_verified_"))
+    dp.add_handler(CallbackQueryHandler(verify_channel_callback, pattern="^verify_"))
+    dp.add_handler(MessageHandler(Filters.command, unknown_command))
+
+    print(f"🤖 Bot is running...")
+    print(f"🔧 Using session file: {USER_SESSION_FILE}")
+    print(f"🌍 Environment: {'render' if 'RENDER' in os.environ else 'local'}")
+    print(f"☁️ S3 Bucket: {AWS_BUCKET_NAME}")
+    
+    # ✅ FIX: Run S3 checking in background threads to prevent blocking
+    def check_s3_async():
+        try:
+            print("\n🔍 Checking S3 files efficiently (using head_object)...")
+            s3_status = check_s3_files_status()
+            print("✅ S3 check completed!")
+        except Exception as e:
+            print(f"⚠️ S3 check failed: {e}")
+    
+    def ensure_s3_async():
+        try:
+            ensure_s3_structure()
+            print("✅ S3 structure ensured!")
+        except Exception as e:
+            print(f"⚠️ S3 structure setup failed: {e}")
+    
+    # Start S3 operations in background threads
+    s3_thread = threading.Thread(target=check_s3_async, daemon=True)
+    s3_thread.start()
+    
+    s3_structure_thread = threading.Thread(target=ensure_s3_async, daemon=True)
+    s3_structure_thread.start()
+
     try:
-        # Start Flask thread FIRST
-        flask_thread = threading.Thread(target=run_flask, daemon=True)
-        flask_thread.start()
-        print("✅ Flask server started in background thread")
-        
-        from telegram.utils.request import Request
-        from telegram.error import Conflict
-        
-        # ✅ FIX: Create Bot with Request instead of passing to Updater
-        request = Request(connect_timeout=30, read_timeout=30, con_pool_size=8)
-        bot = Bot(token=BOT_TOKEN, request=request)
-        
-        # ✅ FIX: Pass bot to Updater instead of token
-        updater = Updater(bot=bot, use_context=True)
-        dp = updater.dispatcher
-        
-        # Add error handler
-        dp.add_error_handler(error_handler)
-       
-        # All your existing handlers
-        dp.add_handler(CommandHandler("start", start))
-        dp.add_handler(CommandHandler("code", code))
-        dp.add_handler(CommandHandler("addchannel", add_channel))
-        dp.add_handler(CommandHandler("addmultiplechannels", add_multiple_channels))
-        dp.add_handler(CommandHandler("multipleverifiedchanneladder", multiple_verifiedchanneladder))
-        dp.add_handler(CommandHandler("verifiedchanneladder", verified_channel_adder))
-        dp.add_handler(CommandHandler("verifychannel", verify_channel))
-        dp.add_handler(CommandHandler("optimizationchecker", optimization_checker))
-        dp.add_handler(CommandHandler("listchannels", list_channels))
-        dp.add_handler(CommandHandler("checkchannel", check_channel))
-        dp.add_handler(CommandHandler("deletechannel", delete_channel))
-        dp.add_handler(CommandHandler("check_session", check_session))
-        dp.add_handler(CommandHandler("checksessionusage", check_session_usage))
-        dp.add_handler(CommandHandler("test", test_connection))
-        dp.add_handler(CommandHandler("check_data", check_scraped_data))
-        dp.add_handler(CommandHandler("check_s3", check_s3_status))
-        dp.add_handler(CommandHandler("diagnose", diagnose_session))
-        dp.add_handler(CommandHandler("debug_json", debug_s3_json))
-        dp.add_handler(CommandHandler("deletes3files", delete_s3_files))
-        dp.add_handler(CommandHandler("getscrapedjson", get_scraped_json))
-        dp.add_handler(CommandHandler("debug_json_comprehensive", debug_json_comprehensive))
-        dp.add_handler(CommandHandler("start_24h_auto_scraping", start_24h_auto_scraping))
-        dp.add_handler(CommandHandler("schedule_24h_auto_scraping", schedule_24h_auto_scraping))
-        dp.add_handler(CommandHandler("checkverification", check_verification_status))
-        dp.add_handler(CommandHandler("removeverified", remove_verified))
-        dp.add_handler(CommandHandler("removeallverified", remove_all_verified))
-        dp.add_handler(CommandHandler("verificationmanager", verification_manager))
-        dp.add_handler(CommandHandler("rescrapechannel", rescrape_channel))
-        dp.add_handler(CallbackQueryHandler(remove_verified_callback, pattern="^remove_all_verified_"))
-        dp.add_handler(CallbackQueryHandler(verification_manager_callback, pattern="^verification_"))
-        dp.add_handler(CallbackQueryHandler(verification_manager_callback, pattern="^remove_verify_"))
-        dp.add_handler(CallbackQueryHandler(remove_verified_callback, pattern="^remove_verify_|remove_verified_refresh"))
-        dp.add_handler(CallbackQueryHandler(verification_manager_callback, pattern="^(verify_|remove_verify_|verification_stats|remove_all_verified|verification_manager)"))
-        dp.add_handler(CallbackQueryHandler(remove_verified_callback, pattern="^remove_all_verified_"))
-        dp.add_handler(CallbackQueryHandler(verify_channel_callback, pattern="^verify_"))
-        dp.add_handler(MessageHandler(Filters.command, unknown_command))
-
-        print(f"🤖 Bot is running...")
-        print(f"🔧 Using session file: {USER_SESSION_FILE}")
-        print(f"🌍 Environment: {'render' if 'RENDER' in os.environ else 'local'}")
-        print(f"☁️ S3 Bucket: {AWS_BUCKET_NAME}")
-        
-        # ✅ FIX: Run S3 checking in background threads to prevent blocking
-        def check_s3_async():
-            try:
-                print("\n🔍 Checking S3 files efficiently (using head_object)...")
-                s3_status = check_s3_files_status()
-                print("✅ S3 check completed!")
-            except Exception as e:
-                print(f"⚠️ S3 check failed: {e}")
-        
-        def ensure_s3_async():
-            try:
-                ensure_s3_structure()
-                print("✅ S3 structure ensured!")
-            except Exception as e:
-                print(f"⚠️ S3 structure setup failed: {e}")
-        
-        # Start S3 operations in background threads
-        s3_thread = threading.Thread(target=check_s3_async, daemon=True)
-        s3_thread.start()
-        
-        s3_structure_thread = threading.Thread(target=ensure_s3_async, daemon=True)
-        s3_structure_thread.start()
-
-        # ✅ FIX: Start polling with better error handling and keep alive
+        # ✅ FIX: Start polling with better error handling
         print("🚀 Starting bot polling...")
         updater.start_polling(
-            timeout=20,  # Increased timeout
+            timeout=10,
             drop_pending_updates=True,
             allowed_updates=['message', 'callback_query']
         )
         print("✅ Bot started successfully!")
         
-        # ✅ FIX: Keep the main thread alive with proper error handling
-        print("🔄 Bot is now running and waiting for messages...")
-        
         # Keep the main thread alive
-        while True:
-            try:
-                time.sleep(10)  # Sleep instead of using updater.idle()
-            except KeyboardInterrupt:
-                print("\n🛑 Shutting down bot gracefully...")
-                updater.stop()
-                break
-            except Exception as e:
-                print(f"⚠️ Keep-alive error: {e}")
-                time.sleep(10)  # Continue running even if there's an error
-                
+        updater.idle()
+        
+    except KeyboardInterrupt:
+        print("\n🛑 Shutting down bot...")
     except Exception as e:
-        print(f"❌ Bot startup error: {e}")
+        print(f"❌ Bot error: {e}")
         import traceback
         print(f"🔍 Full traceback: {traceback.format_exc()}")
-        
-        # Try to restart after error
-        print("🔄 Attempting to restart bot in 10 seconds...")
-        time.sleep(10)
-        main()  # Recursive restart
+    finally:
+        print("👋 Bot stopped")
+if __name__ == "__main__":
+    main()
