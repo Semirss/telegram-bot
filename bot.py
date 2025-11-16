@@ -2670,7 +2670,7 @@ def remove_verified_callback(update, context):
             parse_mode="HTML"
         )
 @authorized
-def verification_manager(update, context):
+def verification_status(update, context):
     """Enhanced verification management with more options"""
     # Get verification statistics
     total_channels = channels_collection.count_documents({})
@@ -2678,8 +2678,7 @@ def verification_manager(update, context):
     unverified_channels = total_channels - verified_channels
     
     keyboard = [
-        [InlineKeyboardButton("🟢 Verify Channel", callback_data="verify_channel_list")],
-        [InlineKeyboardButton("📊 Verification Stats", callback_data="verification_stats")],
+        [InlineKeyboardButton("📊 Verification Statscomprhensive", callback_data="verification_stats")],
     ]
     
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -2695,7 +2694,7 @@ def verification_manager(update, context):
         parse_mode="HTML"
     )
 
-def verification_manager_callback(update, context):
+def verification_status_callback(update, context):
     """Handle verification manager callbacks"""
     query = update.callback_query
     query.answer()
@@ -2723,7 +2722,7 @@ def verification_manager_callback(update, context):
                 
             keyboard.append([InlineKeyboardButton(button_text, callback_data=f"verify_{username}")])
         
-        keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="verification_manager_back")])
+        keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="verification_status_back")])
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         query.edit_message_text(
@@ -2763,7 +2762,7 @@ def verification_manager_callback(update, context):
         )
     
     elif callback_data.startswith("verify_"):
-        # Handle both verification callbacks (from verify_channel and verification_manager)
+        # Handle both verification callbacks (from verify_channel and verification_status)
         if callback_data == "verify_refresh":
             # Handle refresh from the main verify_channel command
             from . import verify_channel_callback  # Import if needed, or handle here
@@ -2797,7 +2796,7 @@ def verification_manager_callback(update, context):
             f"📌 <b>Channel:</b> {channel.get('title', 'Unknown')}\n"
             f"🔗 <b>Username:</b> {username}\n"
             f"🔄 <b>Status:</b> {status_text}\n\n"
-            f"Use /verificationmanager to manage more channels.",
+            f"Use /verificationstatus to manage more channels.",
             parse_mode="HTML"
         )
     
@@ -2825,7 +2824,7 @@ def verification_manager_callback(update, context):
             f"📌 <b>Channel:</b> {channel.get('title', 'Unknown')}\n"
             f"🔗 <b>Username:</b> {username}\n"
             f"🔴 <b>Status:</b> Not Verified\n\n"
-            f"Use /verificationmanager for more options.",
+            f"Use /verificationstatus for more options.",
             parse_mode="HTML"
         )
     
@@ -2871,7 +2870,7 @@ def verification_manager_callback(update, context):
         keyboard = [
             [
                 InlineKeyboardButton("✅ Yes, remove all", callback_data="remove_all_verified_confirm"),
-                InlineKeyboardButton("❌ Cancel", callback_data="verification_manager_back")
+                InlineKeyboardButton("❌ Cancel", callback_data="verification_status_back")
             ]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -2905,9 +2904,9 @@ def verification_manager_callback(update, context):
             parse_mode="HTML"
         )
     
-    elif callback_data == "verification_manager_back":
+    elif callback_data == "verification_status_back":
         # Go back to main manager
-        verification_manager(update, context)
+        verification_status(update, context)
     
     else:
         # Handle unknown callback data
@@ -3151,7 +3150,7 @@ def unknown_command(update, context):
         
         "🛡️ *Verification Management:*\n"
         "┣ /verifychannel \- Verify channel access\n"
-        "┣ /verificationmanager \- Manage verification status\n"
+        "┣ /verificationstatus \- Manage verification status\n"
         "┣ /removeverified \- Show verified channels to remove verification\n"
         "┣ /removeverified @ChannelUsername \- Remove verified status\n"
         "┣ /removeallverified \- Remove all verified status\n", 
@@ -3323,7 +3322,7 @@ def start(update, context):
             
             "🛡️ *Verification Management:*\n"
             "┣ /verifychannel \- Verify channel access\n"
-            "┣ /verificationmanager \- Manage verification status\n"
+            "┣ /verificationstatus \- Manage verification status\n"
             "┣ /removeverified \- Show verified channels to remove\n"
             "┣ /removeverified @ChannelUsername \- Remove verified status\n"
             "┣ /removeallverified \- Remove all verified status\n\n"
@@ -3409,12 +3408,12 @@ def main():
     dp.add_handler(CommandHandler("checkverification", check_verification_status))
     dp.add_handler(CommandHandler("removeverified", remove_verified))
     dp.add_handler(CommandHandler("removeallverified", remove_all_verified))
-    dp.add_handler(CommandHandler("verificationmanager", verification_manager))
+    dp.add_handler(CommandHandler("verificationstatus", verification_status))
     dp.add_handler(CallbackQueryHandler(remove_verified_callback, pattern="^remove_all_verified_"))
-    dp.add_handler(CallbackQueryHandler(verification_manager_callback, pattern="^verification_"))
-    dp.add_handler(CallbackQueryHandler(verification_manager_callback, pattern="^remove_verify_"))
+    dp.add_handler(CallbackQueryHandler(verification_status_callback, pattern="^verification_"))
+    dp.add_handler(CallbackQueryHandler(verification_status_callback, pattern="^remove_verify_"))
     dp.add_handler(CallbackQueryHandler(remove_verified_callback, pattern="^remove_verify_|remove_verified_refresh"))
-    dp.add_handler(CallbackQueryHandler(verification_manager_callback, pattern="^(verify_|remove_verify_|verification_stats|remove_all_verified|verification_manager)"))
+    dp.add_handler(CallbackQueryHandler(verification_status_callback, pattern="^(verify_|remove_verify_|verification_stats|remove_all_verified|verification_status)"))
     dp.add_handler(CallbackQueryHandler(remove_verified_callback, pattern="^remove_all_verified_"))
     dp.add_handler(CallbackQueryHandler(verify_channel_callback, pattern="^verify_"))
     dp.add_handler(MessageHandler(Filters.command, unknown_command))
