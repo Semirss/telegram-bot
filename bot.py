@@ -3836,7 +3836,7 @@ def main():
     dp.add_handler(CommandHandler("schedule_24h_auto_scraping", schedule_24h_auto_scraping))
     dp.add_handler(CommandHandler("checkverification", check_verification_status))
     dp.add_handler(CommandHandler("removeverified", remove_verified))
-    dp.add_handler(CommandHandler("removeallverified", remove_all_verified))
+    # dp.add_handler(CommandHandler("removeallverified", remove_all_verified))
     dp.add_handler(CommandHandler("verificationmanager", verification_manager))
     dp.add_handler(CommandHandler("rescrapechannel", rescrape_channel))
     dp.add_handler(CallbackQueryHandler(remove_verified_callback, pattern="^remove_all_verified_"))
