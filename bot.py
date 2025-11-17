@@ -1048,19 +1048,28 @@ def verify_channel(update, context):
         reply_markup=reply_markup,
         parse_mode="HTML"
     )
-
 def verify_channel_process(update, context, username):
     """Process channel verification with data cleanup and refresh"""
     try:
+        # Get the correct chat ID based on whether it's from a message or callback query
+        if hasattr(update, 'effective_chat'):  # It's a Message update
+            chat_id = update.effective_chat.id
+            message_method = context.bot.send_message
+        else:  # It's a CallbackQuery
+            chat_id = update.message.chat.id
+            message_method = context.bot.send_message
+            # Answer the callback first
+            update.answer()
+        
         # Step 1: Clean up existing data for this channel
-        context.bot.send_message(update.effective_chat.id, f"🧹 Step 1: Cleaning up existing data for {username}...")
+        message_method(chat_id, f"🧹 Step 1: Cleaning up existing data for {username}...")
         
         # Clean from forwarded messages
         all_forwarded_data = load_json_from_s3(f"data/{FORWARDED_FILE}")
         if isinstance(all_forwarded_data, dict) and username in all_forwarded_data:
             del all_forwarded_data[username]
             save_json_to_s3(all_forwarded_data, f"data/{FORWARDED_FILE}")
-            context.bot.send_message(update.effective_chat.id, f"✅ Removed {username} from forwarded messages history")
+            message_method(chat_id, f"✅ Removed {username} from forwarded messages history")
         
         # Clean from scraped data
         scraped_data = load_scraped_data_from_s3()
@@ -1070,10 +1079,10 @@ def verify_channel_process(update, context, username):
             removed_count = initial_count - len(scraped_data)
             if removed_count > 0:
                 save_scraped_data_to_s3(scraped_data)
-                context.bot.send_message(update.effective_chat.id, f"✅ Removed {removed_count} records of {username} from scraped data")
+                message_method(chat_id, f"✅ Removed {removed_count} records of {username} from scraped data")
         
         # Step 2: Update channel verification status
-        context.bot.send_message(update.effective_chat.id, f"🔄 Step 2: Updating verification status for {username}...")
+        message_method(chat_id, f"🔄 Step 2: Updating verification status for {username}...")
         
         channel = channels_collection.find_one({"username": username})
         if channel:
@@ -1082,42 +1091,47 @@ def verify_channel_process(update, context, username):
                 {"$set": {
                     "isverified": True,
                     "verified_at": datetime.now(),
-                    "verified_by": update.effective_user.id
+                    "verified_by": update.effective_user.id if hasattr(update, 'effective_user') else update.message.from_user.id
                 }}
             )
-            context.bot.send_message(update.effective_chat.id, f"✅ Marked {username} as verified")
+            message_method(chat_id, f"✅ Marked {username} as verified")
         else:
             # If channel doesn't exist in database, add it
             try:
-                chat = context.bot.get_chat(username)
+                # For callback queries, we need to use the bot from context to get chat info
+                if hasattr(update, 'effective_chat'):
+                    chat = context.bot.get_chat(username)
+                else:
+                    chat = context.bot.get_chat(username)
+                    
                 channels_collection.insert_one({
                     "username": username, 
                     "title": chat.title,
                     "isverified": True,
                     "verified_at": datetime.now(),
-                    "verified_by": update.effective_user.id
+                    "verified_by": update.effective_user.id if hasattr(update, 'effective_user') else update.message.from_user.id
                 })
-                context.bot.send_message(update.effective_chat.id, f"✅ Added and verified {username}")
+                message_method(chat_id, f"✅ Added and verified {username}")
             except Exception as e:
-                context.bot.send_message(update.effective_chat.id, f"❌ Could not add channel: {str(e)}")
+                message_method(chat_id, f"❌ Could not add channel: {str(e)}")
                 return
 
         # Step 3: Forward last 7 days of messages
-        context.bot.send_message(update.effective_chat.id, f"📤 Step 3: Forwarding last 7 days from {username}...")
+        message_method(chat_id, f"📤 Step 3: Forwarding last 7 days from {username}...")
         success, result_msg = forward_last_7d_sync(username)
-        context.bot.send_message(update.effective_chat.id, text=result_msg, parse_mode="HTML")
+        message_method(chat_id, text=result_msg, parse_mode="HTML")
         
         if not success and "No new posts" not in result_msg:
-            context.bot.send_message(update.effective_chat.id, f"⚠️ Forwarding had issues, but continuing...")
+            message_method(chat_id, f"⚠️ Forwarding had issues, but continuing...")
 
         # Step 4: Scrape 7 days of data
-        context.bot.send_message(update.effective_chat.id, f"🤖 Step 4: Scraping and AI-enhancing data from {username}...")
+        message_method(chat_id, f"🤖 Step 4: Scraping and AI-enhancing data from {username}...")
         success, result_msg = scrape_channel_7days_sync(username)
-        context.bot.send_message(update.effective_chat.id, text=result_msg, parse_mode="HTML")
+        message_method(chat_id, text=result_msg, parse_mode="HTML")
 
         # Final summary
-        context.bot.send_message(
-            update.effective_chat.id,
+        message_method(
+            chat_id,
             f"✅ <b>Verification Complete!</b>\n\n"
             f"📌 <b>Channel:</b> {username}\n"
             f"🟢 <b>Status:</b> Verified\n"
@@ -1128,7 +1142,7 @@ def verify_channel_process(update, context, username):
 
     except Exception as e:
         error_msg = f"❌ Verification process failed: {str(e)}"
-        context.bot.send_message(update.effective_chat.id, text=error_msg)
+        message_method(chat_id, text=error_msg)
         print(f"❌ Verification error: {e}")
 def verify_channel_callback(update, context):
     """Handle channel verification callback queries"""
@@ -2651,19 +2665,28 @@ def remove_verified(update, context):
         reply_markup=reply_markup,
         parse_mode="HTML"
     )
-
 def remove_verified_process(update, context, username):
     """Process verified status removal with data cleanup and refresh"""
     try:
+        # Get the correct chat ID based on whether it's from a message or callback query
+        if hasattr(update, 'effective_chat'):  # It's a Message update
+            chat_id = update.effective_chat.id
+            message_method = context.bot.send_message
+        else:  # It's a CallbackQuery
+            chat_id = update.message.chat.id
+            message_method = context.bot.send_message
+            # Answer the callback first
+            update.answer()
+        
         # Step 1: Clean up existing data for this channel
-        context.bot.send_message(update.effective_chat.id, f"🧹 Step 1: Cleaning up existing data for {username}...")
+        message_method(chat_id, f"🧹 Step 1: Cleaning up existing data for {username}...")
         
         # Clean from forwarded messages
         all_forwarded_data = load_json_from_s3(f"data/{FORWARDED_FILE}")
         if isinstance(all_forwarded_data, dict) and username in all_forwarded_data:
             del all_forwarded_data[username]
             save_json_to_s3(all_forwarded_data, f"data/{FORWARDED_FILE}")
-            context.bot.send_message(update.effective_chat.id, f"✅ Removed {username} from forwarded messages history")
+            message_method(chat_id, f"✅ Removed {username} from forwarded messages history")
         
         # Clean from scraped data
         scraped_data = load_scraped_data_from_s3()
@@ -2673,10 +2696,10 @@ def remove_verified_process(update, context, username):
             removed_count = initial_count - len(scraped_data)
             if removed_count > 0:
                 save_scraped_data_to_s3(scraped_data)
-                context.bot.send_message(update.effective_chat.id, f"✅ Removed {removed_count} records of {username} from scraped data")
+                message_method(chat_id, f"✅ Removed {removed_count} records of {username} from scraped data")
         
         # Step 2: Update channel verification status
-        context.bot.send_message(update.effective_chat.id, f"🔄 Step 2: Removing verified status from {username}...")
+        message_method(chat_id, f"🔄 Step 2: Removing verified status from {username}...")
         
         channel = channels_collection.find_one({"username": username})
         if channel:
@@ -2688,27 +2711,27 @@ def remove_verified_process(update, context, username):
                     "verified_by": None
                 }}
             )
-            context.bot.send_message(update.effective_chat.id, f"✅ Removed verified status from {username}")
+            message_method(chat_id, f"✅ Removed verified status from {username}")
         else:
-            context.bot.send_message(update.effective_chat.id, f"❌ Channel {username} not found in database")
+            message_method(chat_id, f"❌ Channel {username} not found in database")
             return
 
         # Step 3: Forward last 7 days of messages (as unverified)
-        context.bot.send_message(update.effective_chat.id, f"📤 Step 3: Forwarding last 7 days from {username} (unverified)...")
+        message_method(chat_id, f"📤 Step 3: Forwarding last 7 days from {username} (unverified)...")
         success, result_msg = forward_last_7d_sync(username)
-        context.bot.send_message(update.effective_chat.id, text=result_msg, parse_mode="HTML")
+        message_method(chat_id, text=result_msg, parse_mode="HTML")
         
         if not success and "No new posts" not in result_msg:
-            context.bot.send_message(update.effective_chat.id, f"⚠️ Forwarding had issues, but continuing...")
+            message_method(chat_id, f"⚠️ Forwarding had issues, but continuing...")
 
         # Step 4: Scrape 7 days of data (as unverified)
-        context.bot.send_message(update.effective_chat.id, f"🤖 Step 4: Scraping data from {username} (unverified)...")
+        message_method(chat_id, f"🤖 Step 4: Scraping data from {username} (unverified)...")
         success, result_msg = scrape_channel_7days_sync(username)
-        context.bot.send_message(update.effective_chat.id, text=result_msg, parse_mode="HTML")
+        message_method(chat_id, text=result_msg, parse_mode="HTML")
 
         # Final summary
-        context.bot.send_message(
-            update.effective_chat.id,
+        message_method(
+            chat_id,
             f"✅ <b>Verification Removal Complete!</b>\n\n"
             f"📌 <b>Channel:</b> {username}\n"
             f"🔴 <b>Status:</b> Not Verified\n"
@@ -2719,9 +2742,8 @@ def remove_verified_process(update, context, username):
 
     except Exception as e:
         error_msg = f"❌ Verification removal process failed: {str(e)}"
-        context.bot.send_message(update.effective_chat.id, text=error_msg)
+        message_method(chat_id, text=error_msg)
         print(f"❌ Verification removal error: {e}")
-
 def remove_verified_callback(update, context):
     """Handle remove verified callback queries"""
     query = update.callback_query
