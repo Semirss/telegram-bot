@@ -998,10 +998,21 @@ def verified_channel_adder(update, context):
             context.bot.send_message(update.effective_chat.id, text=error_msg, parse_mode="HTML")
 
     threading.Thread(target=run_operations, daemon=True).start()
-
 @authorized
 def verify_channel(update, context):
-    """Show available channels and allow toggling verified status"""
+    """Show available channels and allow toggling verified status with data cleanup"""
+    if context.args:
+        # Direct verification via command argument
+        username = context.args[0].strip()
+        if not username.startswith("@"):
+            update.message.reply_text("❌ Please provide a valid channel username starting with @")
+            return
+        
+        # Start verification process
+        update.message.reply_text(f"🔄 Starting verification process for {username}...")
+        threading.Thread(target=verify_channel_process, args=(update, context, username), daemon=True).start()
+        return
+
     # Get all channels from database
     channels = list(channels_collection.find({}))
     
@@ -1037,6 +1048,88 @@ def verify_channel(update, context):
         reply_markup=reply_markup,
         parse_mode="HTML"
     )
+
+def verify_channel_process(update, context, username):
+    """Process channel verification with data cleanup and refresh"""
+    try:
+        # Step 1: Clean up existing data for this channel
+        context.bot.send_message(update.effective_chat.id, f"🧹 Step 1: Cleaning up existing data for {username}...")
+        
+        # Clean from forwarded messages
+        all_forwarded_data = load_json_from_s3(f"data/{FORWARDED_FILE}")
+        if isinstance(all_forwarded_data, dict) and username in all_forwarded_data:
+            del all_forwarded_data[username]
+            save_json_to_s3(all_forwarded_data, f"data/{FORWARDED_FILE}")
+            context.bot.send_message(update.effective_chat.id, f"✅ Removed {username} from forwarded messages history")
+        
+        # Clean from scraped data
+        scraped_data = load_scraped_data_from_s3()
+        if scraped_data:
+            initial_count = len(scraped_data)
+            scraped_data = [item for item in scraped_data if item.get('channel') != username]
+            removed_count = initial_count - len(scraped_data)
+            if removed_count > 0:
+                save_scraped_data_to_s3(scraped_data)
+                context.bot.send_message(update.effective_chat.id, f"✅ Removed {removed_count} records of {username} from scraped data")
+        
+        # Step 2: Update channel verification status
+        context.bot.send_message(update.effective_chat.id, f"🔄 Step 2: Updating verification status for {username}...")
+        
+        channel = channels_collection.find_one({"username": username})
+        if channel:
+            channels_collection.update_one(
+                {"username": username},
+                {"$set": {
+                    "isverified": True,
+                    "verified_at": datetime.now(),
+                    "verified_by": update.effective_user.id
+                }}
+            )
+            context.bot.send_message(update.effective_chat.id, f"✅ Marked {username} as verified")
+        else:
+            # If channel doesn't exist in database, add it
+            try:
+                chat = context.bot.get_chat(username)
+                channels_collection.insert_one({
+                    "username": username, 
+                    "title": chat.title,
+                    "isverified": True,
+                    "verified_at": datetime.now(),
+                    "verified_by": update.effective_user.id
+                })
+                context.bot.send_message(update.effective_chat.id, f"✅ Added and verified {username}")
+            except Exception as e:
+                context.bot.send_message(update.effective_chat.id, f"❌ Could not add channel: {str(e)}")
+                return
+
+        # Step 3: Forward last 7 days of messages
+        context.bot.send_message(update.effective_chat.id, f"📤 Step 3: Forwarding last 7 days from {username}...")
+        success, result_msg = forward_last_7d_sync(username)
+        context.bot.send_message(update.effective_chat.id, text=result_msg, parse_mode="HTML")
+        
+        if not success and "No new posts" not in result_msg:
+            context.bot.send_message(update.effective_chat.id, f"⚠️ Forwarding had issues, but continuing...")
+
+        # Step 4: Scrape 7 days of data
+        context.bot.send_message(update.effective_chat.id, f"🤖 Step 4: Scraping and AI-enhancing data from {username}...")
+        success, result_msg = scrape_channel_7days_sync(username)
+        context.bot.send_message(update.effective_chat.id, text=result_msg, parse_mode="HTML")
+
+        # Final summary
+        context.bot.send_message(
+            update.effective_chat.id,
+            f"✅ <b>Verification Complete!</b>\n\n"
+            f"📌 <b>Channel:</b> {username}\n"
+            f"🟢 <b>Status:</b> Verified\n"
+            f"📊 <b>Data:</b> Cleaned and refreshed\n"
+            f"🤖 <b>AI:</b> Enhanced with latest categories",
+            parse_mode="HTML"
+        )
+
+    except Exception as e:
+        error_msg = f"❌ Verification process failed: {str(e)}"
+        context.bot.send_message(update.effective_chat.id, text=error_msg)
+        print(f"❌ Verification error: {e}")
 
 def verify_channel_callback(update, context):
     """Handle channel verification callback queries"""
@@ -1077,34 +1170,10 @@ def verify_channel_callback(update, context):
     if callback_data.startswith("verify_"):
         username = callback_data[7:]  # Remove "verify_" prefix
         
-        # Find the channel
-        channel = channels_collection.find_one({"username": username})
-        if not channel:
-            query.edit_message_text(f"❌ Channel {username} not found in database.")
-            return
-        
-        # Toggle verified status
-        current_status = channel.get("isverified", False)
-        new_status = not current_status
-        
-        channels_collection.update_one(
-            {"username": username},
-            {"$set": {
-                "isverified": new_status,
-                "verified_at": datetime.now() if new_status else None,
-                "verified_by": query.from_user.id if new_status else None
-            }}
-        )
-        
-        status_text = "verified ✅" if new_status else "unverified ❌"
-        query.edit_message_text(
-            f"✅ <b>Channel status updated!</b>\n\n"
-            f"📌 <b>Channel:</b> {channel.get('title', 'Unknown')}\n"
-            f"🔗 <b>Username:</b> {username}\n"
-            f"🔄 <b>Status:</b> {status_text}\n\n"
-            f"Use /verifychannel to manage more channels.",
-            parse_mode="HTML"
-        )
+        # Start verification process in background
+        query.edit_message_text(f"🔄 Starting verification process for {username}...")
+        threading.Thread(target=verify_channel_process, args=(query, context, username), daemon=True).start()
+
 
 @authorized
 def debug_json_comprehensive(update, context):
@@ -2489,50 +2558,7 @@ def start_24h_auto_scraping(update, context):
     
     threading.Thread(target=run_auto_scraping, daemon=True).start()
     update.message.reply_text("🚀 Starting 24-hour auto-scraping cycle in background...")
-@authorized
-def remove_verified(update, context):
-    """Remove verified status from a channel"""
-    if len(context.args) == 0:
-        update.message.reply_text(
-            "⚡ Usage: /removeverified @ChannelUsername\n\n"
-            "This will remove the verified status from the specified channel."
-        )
-        return
 
-    username = context.args[0].strip()
-    if not username.startswith("@"):
-        update.message.reply_text("❌ Please provide a valid channel username starting with @")
-        return
-
-    # Find the channel
-    channel = channels_collection.find_one({"username": username})
-    if not channel:
-        update.message.reply_text(f"❌ Channel {username} not found in database.")
-        return
-
-    # Check if already not verified
-    if not channel.get("isverified", False):
-        update.message.reply_text(f"ℹ️ Channel {username} is already not verified.")
-        return
-
-    # Remove verified status
-    channels_collection.update_one(
-        {"username": username},
-        {"$set": {
-            "isverified": False,
-            "verified_at": None,
-            "verified_by": None
-        }}
-    )
-
-    update.message.reply_text(
-        f"✅ <b>Verified status removed!</b>\n\n"
-        f"📌 <b>Channel:</b> {channel.get('title', 'Unknown')}\n"
-        f"🔗 <b>Username:</b> {username}\n"
-        f"🔴 <b>Status:</b> Not Verified\n\n"
-        f"Use /verifychannel to manage verification status.",
-        parse_mode="HTML"
-    )
 @authorized
 def remove_all_verified(update, context):
     """Remove verified status from all channels"""
@@ -2579,9 +2605,22 @@ def bulk_remove_callback(update, context):
         
     elif callback_data == "bulk_remove_cancel":
         query.edit_message_text("❌ Operation cancelled. No changes were made.")
+
 @authorized
 def remove_verified(update, context):
-    """Show verified channels and allow removing verification status"""
+    """Remove verified status from channels with data cleanup"""
+    if context.args:
+        # Direct removal via command argument
+        username = context.args[0].strip()
+        if not username.startswith("@"):
+            update.message.reply_text("❌ Please provide a valid channel username starting with @")
+            return
+        
+        # Start removal process
+        update.message.reply_text(f"🔄 Starting removal process for {username}...")
+        threading.Thread(target=remove_verified_process, args=(update, context, username), daemon=True).start()
+        return
+
     # Get all verified channels
     verified_channels = list(channels_collection.find({"isverified": True}))
     
@@ -2610,10 +2649,80 @@ def remove_verified(update, context):
     
     update.message.reply_text(
         "🔴 <b>Remove Verified Status</b>\n\n"
-        "Click on any channel to remove its verified status:",
+        "Click on any channel to remove its verified status and clean its data:",
         reply_markup=reply_markup,
         parse_mode="HTML"
     )
+
+def remove_verified_process(update, context, username):
+    """Process verified status removal with data cleanup and refresh"""
+    try:
+        # Step 1: Clean up existing data for this channel
+        context.bot.send_message(update.effective_chat.id, f"🧹 Step 1: Cleaning up existing data for {username}...")
+        
+        # Clean from forwarded messages
+        all_forwarded_data = load_json_from_s3(f"data/{FORWARDED_FILE}")
+        if isinstance(all_forwarded_data, dict) and username in all_forwarded_data:
+            del all_forwarded_data[username]
+            save_json_to_s3(all_forwarded_data, f"data/{FORWARDED_FILE}")
+            context.bot.send_message(update.effective_chat.id, f"✅ Removed {username} from forwarded messages history")
+        
+        # Clean from scraped data
+        scraped_data = load_scraped_data_from_s3()
+        if scraped_data:
+            initial_count = len(scraped_data)
+            scraped_data = [item for item in scraped_data if item.get('channel') != username]
+            removed_count = initial_count - len(scraped_data)
+            if removed_count > 0:
+                save_scraped_data_to_s3(scraped_data)
+                context.bot.send_message(update.effective_chat.id, f"✅ Removed {removed_count} records of {username} from scraped data")
+        
+        # Step 2: Update channel verification status
+        context.bot.send_message(update.effective_chat.id, f"🔄 Step 2: Removing verified status from {username}...")
+        
+        channel = channels_collection.find_one({"username": username})
+        if channel:
+            channels_collection.update_one(
+                {"username": username},
+                {"$set": {
+                    "isverified": False,
+                    "verified_at": None,
+                    "verified_by": None
+                }}
+            )
+            context.bot.send_message(update.effective_chat.id, f"✅ Removed verified status from {username}")
+        else:
+            context.bot.send_message(update.effective_chat.id, f"❌ Channel {username} not found in database")
+            return
+
+        # Step 3: Forward last 7 days of messages (as unverified)
+        context.bot.send_message(update.effective_chat.id, f"📤 Step 3: Forwarding last 7 days from {username} (unverified)...")
+        success, result_msg = forward_last_7d_sync(username)
+        context.bot.send_message(update.effective_chat.id, text=result_msg, parse_mode="HTML")
+        
+        if not success and "No new posts" not in result_msg:
+            context.bot.send_message(update.effective_chat.id, f"⚠️ Forwarding had issues, but continuing...")
+
+        # Step 4: Scrape 7 days of data (as unverified)
+        context.bot.send_message(update.effective_chat.id, f"🤖 Step 4: Scraping data from {username} (unverified)...")
+        success, result_msg = scrape_channel_7days_sync(username)
+        context.bot.send_message(update.effective_chat.id, text=result_msg, parse_mode="HTML")
+
+        # Final summary
+        context.bot.send_message(
+            update.effective_chat.id,
+            f"✅ <b>Verification Removal Complete!</b>\n\n"
+            f"📌 <b>Channel:</b> {username}\n"
+            f"🔴 <b>Status:</b> Not Verified\n"
+            f"📊 <b>Data:</b> Cleaned and refreshed\n"
+            f"🔄 <b>Updated:</b> All data marked as unverified",
+            parse_mode="HTML"
+        )
+
+    except Exception as e:
+        error_msg = f"❌ Verification removal process failed: {str(e)}"
+        context.bot.send_message(update.effective_chat.id, text=error_msg)
+        print(f"❌ Verification removal error: {e}")
 
 def remove_verified_callback(update, context):
     """Handle remove verified callback queries"""
@@ -2621,8 +2730,6 @@ def remove_verified_callback(update, context):
     query.answer()
     
     callback_data = query.data
-    
-    print(f"🔍 Remove verified callback received: {callback_data}")  # Debug log
     
     if callback_data == "remove_verified_refresh":
         # Refresh the verified channels list
@@ -2636,7 +2743,7 @@ def remove_verified_callback(update, context):
         for channel in verified_channels:
             username = channel.get("username")
             title = channel.get("title", "Unknown")
-            button_text = f"✅ {username} - {title}"
+            button_text = f"🔴 {username} - {title}"
             
             if len(button_text) > 50:
                 button_text = button_text[:47] + "..."
@@ -2647,8 +2754,8 @@ def remove_verified_callback(update, context):
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         query.edit_message_text(
-            "✅ <b>Remove Verified Status</b>\n\n"
-            "Click on any channel to remove its verified status:",
+            "🔴 <b>Remove Verified Status</b>\n\n"
+            "Click on any channel to remove its verified status and clean its data:",
             reply_markup=reply_markup,
             parse_mode="HTML"
         )
@@ -2657,30 +2764,133 @@ def remove_verified_callback(update, context):
     if callback_data.startswith("remove_verify_"):
         username = callback_data[14:]  # Remove "remove_verify_" prefix
         
-        # Find the channel
-        channel = channels_collection.find_one({"username": username})
-        if not channel:
-            query.edit_message_text(f"❌ Channel {username} not found in database.")
-            return
+        # Start removal process in background
+        query.edit_message_text(f"🔄 Starting removal process for {username}...")
+        threading.Thread(target=remove_verified_process, args=(query, context, username), daemon=True).start()
+@authorized
+def clean_up7day(update, context):
+    """Remove data older than 7 days from scraped data and forwarded messages for all channels"""
+    def run_cleanup():
+        try:
+            context.bot.send_message(update.effective_chat.id, "🧹 Starting 7-day data cleanup for all channels...")
+            
+            # Calculate cutoff date (7 days ago)
+            cutoff_date = datetime.now() - timedelta(days=7)
+            context.bot.send_message(update.effective_chat.id, f"⏰ Removing data older than: {cutoff_date.strftime('%Y-%m-%d %H:%M:%S')}")
+            
+            # Step 1: Clean up scraped data
+            context.bot.send_message(update.effective_chat.id, "📊 Step 1: Cleaning up scraped data...")
+            scraped_cleanup_result = clean_up_scraped_data_7days(cutoff_date)
+            context.bot.send_message(update.effective_chat.id, scraped_cleanup_result)
+            
+            # Step 2: Clean up forwarded messages
+            context.bot.send_message(update.effective_chat.id, "📨 Step 2: Cleaning up forwarded messages history...")
+            forwarded_cleanup_result = clean_up_forwarded_messages_7days(cutoff_date)
+            context.bot.send_message(update.effective_chat.id, forwarded_cleanup_result)
+            
+            # Final summary
+            context.bot.send_message(
+                update.effective_chat.id,
+                f"✅ <b>7-Day Cleanup Complete!</b>\n\n"
+                f"📊 <b>Scraped Data:</b> {scraped_cleanup_result}\n"
+                f"📨 <b>Forwarded Messages:</b> {forwarded_cleanup_result}\n\n"
+                f"🧹 All data older than 7 days has been removed.",
+                parse_mode="HTML"
+            )
+            
+        except Exception as e:
+            error_msg = f"❌ Cleanup process failed: {str(e)}"
+            context.bot.send_message(update.effective_chat.id, text=error_msg)
+            print(f"❌ Cleanup error: {e}")
+    
+    threading.Thread(target=run_cleanup, daemon=True).start()
+
+def clean_up_scraped_data_7days(cutoff_date):
+    """Remove scraped data older than 7 days"""
+    try:
+        # Load current scraped data
+        scraped_data = load_scraped_data_from_s3()
+        if not scraped_data:
+            return "No scraped data found to clean"
         
-        # Remove verified status
-        channels_collection.update_one(
-            {"username": username},
-            {"$set": {
-                "isverified": False,
-                "verified_at": None,
-                "verified_by": None
-            }}
-        )
+        initial_count = len(scraped_data)
         
-        query.edit_message_text(
-            f"✅ <b>Verified status removed!</b>\n\n"
-            f"📌 <b>Channel:</b> {channel.get('title', 'Unknown')}\n"
-            f"🔗 <b>Username:</b> {username}\n"
-            f"🔴 <b>Status:</b> Not Verified\n\n"
-            f"Use /removeverified to remove verification from more channels.",
-            parse_mode="HTML"
-        )
+        # Filter out records older than 7 days
+        cleaned_data = []
+        removed_count = 0
+        
+        for item in scraped_data:
+            try:
+                # Parse the date from the item
+                if 'date' in item and item['date']:
+                    item_date = datetime.strptime(item['date'], "%Y-%m-%d %H:%M:%S")
+                    if item_date >= cutoff_date:
+                        cleaned_data.append(item)
+                    else:
+                        removed_count += 1
+                else:
+                    # Keep items without date (shouldn't happen, but just in case)
+                    cleaned_data.append(item)
+            except Exception as e:
+                # If date parsing fails, keep the item
+                print(f"⚠️ Error parsing date for item: {item.get('product_ref', 'unknown')}, error: {e}")
+                cleaned_data.append(item)
+        
+        # Save cleaned data
+        if save_scraped_data_to_s3(cleaned_data):
+            return f"Removed {removed_count} old records, kept {len(cleaned_data)} recent records"
+        else:
+            return f"Failed to save cleaned data after removing {removed_count} records"
+            
+    except Exception as e:
+        return f"Error cleaning scraped data: {str(e)}"
+
+def clean_up_forwarded_messages_7days(cutoff_date):
+    """Remove forwarded messages history older than 7 days"""
+    try:
+        # Load current forwarded messages data
+        all_forwarded_data = load_json_from_s3(f"data/{FORWARDED_FILE}")
+        if not isinstance(all_forwarded_data, dict):
+            return "No forwarded messages history found to clean"
+        
+        initial_total_messages = sum(len(messages) for messages in all_forwarded_data.values())
+        removed_total = 0
+        channels_affected = 0
+        
+        # Clean each channel's forwarded messages
+        for channel_username, channel_messages in all_forwarded_data.items():
+            if not isinstance(channel_messages, dict):
+                continue
+                
+            initial_channel_count = len(channel_messages)
+            cleaned_messages = {}
+            
+            for message_id_str, message_date_str in channel_messages.items():
+                try:
+                    message_date = datetime.strptime(message_date_str, "%Y-%m-%d %H:%M:%S")
+                    if message_date >= cutoff_date:
+                        cleaned_messages[message_id_str] = message_date_str
+                    else:
+                        removed_total += 1
+                except Exception as e:
+                    # If date parsing fails, keep the message
+                    print(f"⚠️ Error parsing date for message {message_id_str} in {channel_username}, error: {e}")
+                    cleaned_messages[message_id_str] = message_date_str
+            
+            # Update channel data
+            all_forwarded_data[channel_username] = cleaned_messages
+            if len(cleaned_messages) < initial_channel_count:
+                channels_affected += 1
+        
+        # Save cleaned forwarded messages data
+        if save_json_to_s3(all_forwarded_data, f"data/{FORWARDED_FILE}"):
+            final_total_messages = sum(len(messages) for messages in all_forwarded_data.values())
+            return f"Removed {removed_total} old messages from {channels_affected} channels, kept {final_total_messages} recent messages"
+        else:
+            return f"Failed to save cleaned forwarded messages data after removing {removed_total} messages"
+            
+    except Exception as e:
+        return f"Error cleaning forwarded messages: {str(e)}"
 @authorized
 def verification_status(update, context):
     """Enhanced verification management with more options"""
@@ -3139,7 +3349,6 @@ def unknown_command(update, context):
         "┣ /verifiedchanneladder @ChannelUsername\n"
         "┣ /listchannels\n"
         "┣ /checkchannel @ChannelUsername\n"
-        "┣ /rescrapechannel @ChannelUsername\n"
         "┣ /deletechannel @ChannelUsername\n\n"
         
         "⚡ *Session & System:*\n"
@@ -3155,7 +3364,7 @@ def unknown_command(update, context):
         "┣ /debug_json \- Debug S3 JSON file\n"
         "┣ /deletes3files \- Delete S3 files\n"
         "┣ /getscrapedjson \- Get JSON file\n\n"
-        
+        "┣ /clean_up7day \- Remove data older than 7 days\n\n" 
         "🤖 *Automation:*\n"
         "┣ /start_24h_auto_scraping \- Run 24\-hour auto\-scraping cycle\n"
         # "┣ /schedule\_24h\_auto\_scraping \- Schedule daily auto\-scraping\n\n"
@@ -3165,7 +3374,9 @@ def unknown_command(update, context):
         "┣ /verificationstatus \- Manage verification status\n"
         "┣ /removeverified \- Show verified channels to remove verification\n"
         "┣ /removeverified @ChannelUsername \- Remove verified status\n"
-        "┣ /removeallverified \- Remove all verified status\n", 
+        # "┣ /removeallverified \- Remove all verified status\n", 
+        "🛡️version:1\n"
+
     )
 
 @authorized
@@ -3311,7 +3522,6 @@ def start(update, context):
             "┣ /multipleverifiedchanneladder @channel1,@channel2,\.\.\.\n"
             "┣ /verifiedchanneladder @ChannelUsername\n"
             "┣ /listchannels\n"
-            "┣ /rescrapechannel @ChannelUsername\n"
             "┣ /checkchannel @ChannelUsername\n"
             "┣ /deletechannel @ChannelUsername\n\n"
             
@@ -3327,7 +3537,7 @@ def start(update, context):
             "┣ /debug_json \- Debug S3 JSON file\n"
             "┣ /deletes3files \- Delete S3 files\n"
             "┣ /getscrapedjson \- Get JSON file\n\n"
-            
+            "┣ /clean_up7day \- Remove data older than 7 days\n\n" 
             "🤖 *Automation:*\n"
             "┣ /start_24h_auto_scraping \- Run 24\-hour auto\-scraping cycle\n"
             # "┣ /schedule_24h_auto_scraping \- Schedule daily auto\-scraping\n\n"
@@ -3421,6 +3631,7 @@ def main():
     dp.add_handler(CommandHandler("removeverified", remove_verified))
     dp.add_handler(CommandHandler("removeallverified", remove_all_verified))
     dp.add_handler(CommandHandler("verificationstatus", verification_status))
+    dp.add_handler(CommandHandler("clean_up7day", clean_up7day))
     dp.add_handler(CallbackQueryHandler(remove_verified_callback, pattern="^remove_all_verified_"))
     dp.add_handler(CallbackQueryHandler(verification_status_callback, pattern="^verification_"))
     dp.add_handler(CallbackQueryHandler(verification_status_callback, pattern="^remove_verify_"))
