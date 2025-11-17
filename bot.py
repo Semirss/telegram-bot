@@ -2620,7 +2620,7 @@ def bulk_remove_callback(update, context):
 
 @authorized
 def remove_verified(update, context):
-    """Remove verified status from channels with data cleanup"""
+    """Remove verified status from channels with data cleanup - works exactly like verifychannel but opposite"""
     if context.args:
         # Direct removal via command argument
         username = context.args[0].strip()
@@ -2633,20 +2633,23 @@ def remove_verified(update, context):
         threading.Thread(target=remove_verified_process, args=(update, context, username), daemon=True).start()
         return
 
-    # Get all verified channels
-    verified_channels = list(channels_collection.find({"isverified": True}))
+    # Get all channels from database (show both verified and unverified like verifychannel)
+    channels = list(channels_collection.find({}))
     
-    if not verified_channels:
-        update.message.reply_text("ℹ️ No verified channels found.")
+    if not channels:
+        update.message.reply_text("📭 No channels saved yet. Use /addchannel first.")
         return
 
-    # Create inline keyboard with verified channels
+    # Create inline keyboard with ALL channels (like verifychannel), but highlight verified ones
     keyboard = []
-    for channel in verified_channels:
+    for channel in channels:
         username = channel.get("username")
         title = channel.get("title", "Unknown")
+        is_verified = channel.get("isverified", False)
         
-        button_text = f"🔴 {username} - {title}"
+        # Show verified channels with red X, unverified with gray circle
+        status_icon = "❌" if is_verified else "⚪"
+        button_text = f"{status_icon} {username} - {title}"
         
         # Truncate if too long
         if len(button_text) > 50:
@@ -2654,14 +2657,15 @@ def remove_verified(update, context):
             
         keyboard.append([InlineKeyboardButton(button_text, callback_data=f"remove_verify_{username}")])
 
-    # Add a "Refresh" button
+    # Add a "Refresh" button (like verifychannel)
     keyboard.append([InlineKeyboardButton("🔄 Refresh List", callback_data="remove_verified_refresh")])
     
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     update.message.reply_text(
-        "🔴 <b>Remove Verified Status</b>\n\n"
-        "Click on any channel to remove its verified status and clean its data:",
+        "🔴 <b>Remove Verification Manager</b>\n\n"
+        "❌ = Verified (can remove) | ⚪ = Not Verified (already unverified)\n\n"
+        "Click on any channel to remove its verified status (full cleanup + refresh):",
         reply_markup=reply_markup,
         parse_mode="HTML"
     )
@@ -3369,7 +3373,7 @@ def unknown_command(update, context):
         "┣ /removeverified \- Show verified channels to remove verification\n"
         "┣ /removeverified @ChannelUsername \- Remove verified status\n"
         # "┣ /removeallverified \- Remove all verified status\n", 
-        "🛡️version:1\n"
+        "🛡️version:2\n"
 
     )
 
