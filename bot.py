@@ -2300,7 +2300,14 @@ def start_24h_auto_scraping(update, context):
                         
                         # Load existing data to check for updates
                         existing_data = load_scraped_data_from_s3()
-                        existing_refs = {item['product_ref'] for item in existing_data}
+                        
+                        # 🔥 FIX: Create a unique identifier that combines channel + source_message_id
+                        # This prevents conflicts between different channels
+                        existing_unique_refs = {
+                            f"{item['channel']}_{item['source_message_id']}" 
+                            for item in existing_data 
+                            if 'channel' in item and 'source_message_id' in item
+                        }
                         
                         # Scan target channel for matches
                         scraped_data = []
@@ -2356,8 +2363,9 @@ def start_24h_auto_scraping(update, context):
                             # Use the verification status from the source message
                             is_verified = matching_source.get('is_verified', False)
                             
-                            product_ref = str(target_message.id)
-                            is_new_item = product_ref not in existing_refs
+                            # 🔥 FIX: Create unique reference combining channel and source message ID
+                            unique_ref = f"{matching_source['source_channel']}_{matching_source['source_message_id']}"
+                            is_new_item = unique_ref not in existing_unique_refs
                             
                             post_data = {
                                 "title": info["title"],
@@ -2368,7 +2376,8 @@ def start_24h_auto_scraping(update, context):
                                 "date": target_message.date.strftime("%Y-%m-%d %H:%M:%S"),
                                 "channel": matching_source['source_channel'],
                                 "post_link": post_link,
-                                "product_ref": product_ref,
+                                "product_ref": str(target_message.id),  # Keep original for compatibility
+                                "unique_ref": unique_ref,  # 🔥 NEW: Unique identifier
                                 "scraped_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                                 "predicted_category": predicted_category,
                                 "generated_description": generated_description,
@@ -2381,22 +2390,24 @@ def start_24h_auto_scraping(update, context):
                             if is_new_item:
                                 new_items += 1
                                 scraped_data.append(post_data)
-                                print(f"🆕 New item found: {product_ref}")
+                                print(f"🆕 New item found: {unique_ref}")
                             else:
                                 # Update existing item with new AI enhancement and verification status
                                 updated_items += 1
-                                # Find and update the existing item
+                                # Find and update the existing item using unique_ref
                                 for i, existing_item in enumerate(existing_data):
-                                    if existing_item['product_ref'] == product_ref:
+                                    if existing_item.get('unique_ref') == unique_ref:
                                         # Update AI-enhanced fields and verification status
                                         existing_data[i].update({
                                             "predicted_category": predicted_category,
                                             "generated_description": generated_description,
                                             "ai_enhanced": True,
                                             "channel_verified": is_verified,
-                                            "scraped_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                                            "scraped_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                            "post_link": post_link,  # Update post link in case it changed
+                                            "target_message_id": target_message.id  # Update target message ID
                                         })
-                                        print(f"🔄 Updated existing item: {product_ref}")
+                                        print(f"🔄 Updated existing item: {unique_ref}")
                                         break
                         
                         # Combine new items with updated existing data
@@ -2477,7 +2488,8 @@ def start_24h_auto_scraping(update, context):
             context.bot.send_message(update.effective_chat.id, text=f"❌ Error in auto-scraping: {e}")
     
     threading.Thread(target=run_auto_scraping, daemon=True).start()
-    update.message.reply_text("🚀 Starting 24-hour auto-scraping cycle in background...")@authorized
+    update.message.reply_text("🚀 Starting 24-hour auto-scraping cycle in background...")
+@authorized
 def remove_verified(update, context):
     """Remove verified status from a channel"""
     if len(context.args) == 0:
@@ -3131,22 +3143,22 @@ def unknown_command(update, context):
         "┣ /deletechannel @ChannelUsername\n\n"
         
         "⚡ *Session & System:*\n"
-        "┣ /check\_session \- Check session status\n"
+        "┣ /check_session - Check session status\n"
         "┣ /checksessionusage \- Session usage stats\n"
         "┣ /optimizationchecker \- Comprehensive performance check\n"
         "┣ /test \- Test connection\n\n"
         
         "📊 *Data Management:*\n"
-        "┣ /check\_data \- Check scraped data\n"
-        "┣ /check\_s3 \- Check S3 status\n"
+        "┣ /check_data \- Check scraped data\n"
+        "┣ /check_s3 \- Check S3 status\n"
         "┣ /diagnose \- Diagnose session health\n"
-        "┣ /debug\_json \- Debug S3 JSON file\n"
+        "┣ /debug_json \- Debug S3 JSON file\n"
         "┣ /deletes3files \- Delete S3 files\n"
         "┣ /getscrapedjson \- Get JSON file\n\n"
         
         "🤖 *Automation:*\n"
-        "┣ /start\_24h\_auto\_scraping \- Run 24\-hour auto\-scraping cycle\n"
-        "┣ /schedule\_24h\_auto\_scraping \- Schedule daily auto\-scraping\n\n"
+        "┣ /start_24h_auto_scraping \- Run 24\-hour auto\-scraping cycle\n"
+        # "┣ /schedule\_24h\_auto\_scraping \- Schedule daily auto\-scraping\n\n"
         
         "🛡️ *Verification Management:*\n"
         "┣ /verifychannel \- Verify channel access\n"
@@ -3304,21 +3316,21 @@ def start(update, context):
             "┣ /deletechannel @ChannelUsername\n\n"
             
             "⚡ *Session & System:*\n"
-            "┣ /check\_session \- Check session status\n"
+            "┣ /check_session \- Check session status\n"
             "┣ /checksessionusage \- Session usage stats\n"
             "┣ /optimizationchecker \- Comprehensive performance check\n"
             "┣ /test \- Test connection\n\n"
             
             "📊 *Data Management:*\n"
-            "┣ /check\_data \- Check scraped data\n"
-            "┣ /check\_s3 \- Check S3 status\n"
-            "┣ /debug\_json \- Debug S3 JSON file\n"
+            "┣ /check_data \- Check scraped data\n"
+            "┣ /check_s3 \- Check S3 status\n"
+            "┣ /debug_json \- Debug S3 JSON file\n"
             "┣ /deletes3files \- Delete S3 files\n"
             "┣ /getscrapedjson \- Get JSON file\n\n"
             
             "🤖 *Automation:*\n"
-            "┣ /start\_24h\_auto\_scraping \- Run 24\-hour auto\-scraping cycle\n"
-            "┣ /schedule\_24h\_auto\_scraping \- Schedule daily auto\-scraping\n\n"
+            "┣ /start_24h_auto_scraping \- Run 24\-hour auto\-scraping cycle\n"
+            # "┣ /schedule_24h_auto_scraping \- Schedule daily auto\-scraping\n\n"
             
             "🛡️ *Verification Management:*\n"
             "┣ /verifychannel \- Verify channel access\n"
@@ -3329,7 +3341,7 @@ def start(update, context):
             
             "🔍 *Troubleshooting:*\n"
             "┣ /diagnose \- Diagnose session health\n"
-            "┣ /debug\_json\_comprehensive \- Detailed JSON debug\n",
+            "┣ /debug_json_comprehensive \- Detailed JSON debug\n",
         )
     else:
         update.message.reply_text(
