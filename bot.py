@@ -1130,7 +1130,6 @@ def verify_channel_process(update, context, username):
         error_msg = f"❌ Verification process failed: {str(e)}"
         context.bot.send_message(update.effective_chat.id, text=error_msg)
         print(f"❌ Verification error: {e}")
-
 def verify_channel_callback(update, context):
     """Handle channel verification callback queries"""
     query = update.callback_query
@@ -1170,10 +1169,9 @@ def verify_channel_callback(update, context):
     if callback_data.startswith("verify_"):
         username = callback_data[7:]  # Remove "verify_" prefix
         
-        # Start verification process in background
-        query.edit_message_text(f"🔄 Starting verification process for {username}...")
+        # Start FULL verification process in background (not just toggle status)
+        query.edit_message_text(f"🔄 Starting FULL verification process for {username}...")
         threading.Thread(target=verify_channel_process, args=(query, context, username), daemon=True).start()
-
 
 @authorized
 def debug_json_comprehensive(update, context):
@@ -2987,40 +2985,14 @@ def verification_status_callback(update, context):
         # Handle both verification callbacks (from verify_channel and verification_status)
         if callback_data == "verify_refresh":
             # Handle refresh from the main verify_channel command
-            from . import verify_channel_callback  # Import if needed, or handle here
             verify_channel_callback(update, context)
             return
             
         username = callback_data[7:]  # Remove "verify_" prefix
         
-        # Find the channel
-        channel = channels_collection.find_one({"username": username})
-        if not channel:
-            query.edit_message_text(f"❌ Channel {username} not found in database.")
-            return
-        
-        # Toggle verified status
-        current_status = channel.get("isverified", False)
-        new_status = not current_status
-        
-        channels_collection.update_one(
-            {"username": username},
-            {"$set": {
-                "isverified": new_status,
-                "verified_at": datetime.now() if new_status else None,
-                "verified_by": query.from_user.id if new_status else None
-            }}
-        )
-        
-        status_text = "verified ✅" if new_status else "unverified ❌"
-        query.edit_message_text(
-            f"✅ <b>Channel status updated!</b>\n\n"
-            f"📌 <b>Channel:</b> {channel.get('title', 'Unknown')}\n"
-            f"🔗 <b>Username:</b> {username}\n"
-            f"🔄 <b>Status:</b> {status_text}\n\n"
-            f"Use /verificationstatus to manage more channels.",
-            parse_mode="HTML"
-        )
+        # Start FULL verification process in background
+        query.edit_message_text(f"🔄 Starting FULL verification process for {username}...")
+        threading.Thread(target=verify_channel_process, args=(query, context, username), daemon=True).start()
     
     elif callback_data.startswith("remove_verify_"):
         username = callback_data[14:]  # Remove "remove_verify_" prefix
