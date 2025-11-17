@@ -3366,10 +3366,10 @@ def unknown_command(update, context):
         "🛡️ *Verification Management:*\n"
         "┣ /verifychannel \- Verify channel access\n"
         "┣ /verificationstatus \- Manage verification status\n"
-        "┣ /removeverified \- Show verified channels to remove verification\n"
+        # "┣ /removeverified \- Show verified channels to remove verification\n"
         "┣ /removeverified @ChannelUsername \- Remove verified status\n"
         # "┣ /removeallverified \- Remove all verified status\n", 
-        "🛡️version:1\n"
+        "🛡️version:3\n"
 
     )
 
@@ -3539,7 +3539,7 @@ def start(update, context):
             "🛡️ *Verification Management:*\n"
             "┣ /verifychannel \- Verify channel access\n"
             "┣ /verificationstatus \- Manage verification status\n"
-            "┣ /removeverified \- Show verified channels to remove\n"
+            # "┣ /removeverified \- Show verified channels to remove\n"
             "┣ /removeverified @ChannelUsername \- Remove verified status\n"
             "┣ /removeallverified \- Remove all verified status\n\n"
             
