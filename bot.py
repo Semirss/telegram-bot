@@ -2141,11 +2141,68 @@ def delete_channel(update, context):
         update.message.reply_text("❌ Please provide a valid channel username starting with @")
         return
 
-    result = channels_collection.delete_one({"username": username})
-    if result.deleted_count > 0:
-        update.message.reply_text(f"✅ Channel {username} has been deleted from the database.")
-    else:
-        update.message.reply_text(f"⚠️ Channel {username} was not found in the database.")
+    def run_delete_with_cleanup():
+        try:
+            # Step 1: Clean up scraped data for this channel
+            context.bot.send_message(update.effective_chat.id, f"🧹 Step 1: Cleaning up scraped data for {username}...")
+            
+            scraped_data = load_scraped_data_from_s3()
+            if scraped_data:
+                initial_count = len(scraped_data)
+                # Remove all records for this channel
+                cleaned_data = [item for item in scraped_data if item.get('channel') != username]
+                removed_count = initial_count - len(cleaned_data)
+                
+                if removed_count > 0:
+                    save_scraped_data_to_s3(cleaned_data)
+                    context.bot.send_message(update.effective_chat.id, f"✅ Removed {removed_count} records of {username} from scraped data")
+                else:
+                    context.bot.send_message(update.effective_chat.id, f"ℹ️ No scraped data found for {username}")
+            else:
+                context.bot.send_message(update.effective_chat.id, f"ℹ️ No scraped data found to clean")
+
+            # Step 2: Clean up forwarded messages history for this channel
+            context.bot.send_message(update.effective_chat.id, f"🧹 Step 2: Cleaning up forwarded messages history for {username}...")
+            
+            all_forwarded_data = load_json_from_s3(f"data/{FORWARDED_FILE}")
+            if isinstance(all_forwarded_data, dict) and username in all_forwarded_data:
+                # Count how many messages we're removing
+                messages_removed = len(all_forwarded_data[username])
+                # Remove the channel from forwarded data
+                del all_forwarded_data[username]
+                save_json_to_s3(all_forwarded_data, f"data/{FORWARDED_FILE}")
+                context.bot.send_message(update.effective_chat.id, f"✅ Removed {messages_removed} forwarded messages history for {username}")
+            else:
+                context.bot.send_message(update.effective_chat.id, f"ℹ️ No forwarded messages history found for {username}")
+
+            # Step 3: Delete the channel from MongoDB
+            context.bot.send_message(update.effective_chat.id, f"🗑️ Step 3: Deleting channel {username} from database...")
+            
+            result = channels_collection.delete_one({"username": username})
+            if result.deleted_count > 0:
+                context.bot.send_message(
+                    update.effective_chat.id,
+                    f"✅ <b>Channel {username} has been completely deleted!</b>\n\n"
+                    f"📊 <b>Cleanup Summary:</b>\n"
+                    f"• Removed from database ✓\n"
+                    f"• Cleaned scraped data ✓\n"
+                    f"• Cleaned forwarded history ✓\n\n"
+                    f"All data for this channel has been removed.",
+                    parse_mode="HTML"
+                )
+            else:
+                context.bot.send_message(update.effective_chat.id, f"⚠️ Channel {username} was not found in the database.")
+
+        except Exception as e:
+            error_msg = f"❌ Error during channel deletion: {str(e)}"
+            context.bot.send_message(update.effective_chat.id, text=error_msg)
+            print(f"❌ Channel deletion error: {e}")
+
+    # Run the deletion process in a separate thread
+    threading.Thread(target=run_delete_with_cleanup, daemon=True).start()
+    
+    # Send initial response
+    update.message.reply_text(f"🔄 Starting complete deletion process for {username}...")
 @authorized
 def delete_s3_files(update, context):
     """Delete the scraped_data.json and forwarded_messages.json files from S3"""
@@ -2794,9 +2851,9 @@ def clean_up7day(update, context):
         try:
             context.bot.send_message(update.effective_chat.id, "🧹 Starting 7-day data cleanup for all channels...")
             
-            # Calculate cutoff date (7 days ago)
-            cutoff_date = datetime.now() - timedelta(days=7)
-            context.bot.send_message(update.effective_chat.id, f"⏰ Removing data older than: {cutoff_date.strftime('%Y-%m-%d %H:%M:%S')}")
+            # Calculate cutoff date (7 days ago) with timezone awareness
+            cutoff_date = datetime.now(timezone.utc) - timedelta(days=7)
+            context.bot.send_message(update.effective_chat.id, f"⏰ Removing data older than: {cutoff_date.strftime('%Y-%m-%d %H:%M:%S')} UTC")
             
             # Step 1: Clean up scraped data
             context.bot.send_message(update.effective_chat.id, "📊 Step 1: Cleaning up scraped data...")
@@ -2813,8 +2870,7 @@ def clean_up7day(update, context):
                 update.effective_chat.id,
                 f"✅ <b>7-Day Cleanup Complete!</b>\n\n"
                 f"📊 <b>Scraped Data:</b> {scraped_cleanup_result}\n"
-                f"📨 <b>Forwarded Messages:</b> {forwarded_cleanup_result}\n\n"
-                f"🧹 All data older than 7 days has been removed.",
+                f"📨 <b>Forwarded Messages:</b> {forwarded_cleanup_result}",
                 parse_mode="HTML"
             )
             
@@ -2826,7 +2882,7 @@ def clean_up7day(update, context):
     threading.Thread(target=run_cleanup, daemon=True).start()
 
 def clean_up_scraped_data_7days(cutoff_date):
-    """Remove scraped data older than 7 days"""
+    """Remove scraped data older than 7 days with proper date handling"""
     try:
         # Load current scraped data
         scraped_data = load_scraped_data_from_s3()
@@ -2843,22 +2899,36 @@ def clean_up_scraped_data_7days(cutoff_date):
             try:
                 # Parse the date from the item
                 if 'date' in item and item['date']:
-                    item_date = datetime.strptime(item['date'], "%Y-%m-%d %H:%M:%S")
+                    # Parse the date string to a timezone-aware datetime
+                    item_date_str = item['date']
+                    # Handle different date formats
+                    if 'T' in item_date_str:
+                        # ISO format with T
+                        item_date = datetime.fromisoformat(item_date_str.replace('Z', '+00:00'))
+                    else:
+                        # Standard format without T
+                        item_date = datetime.strptime(item_date_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+                    
+                    # Make sure cutoff_date is timezone-aware for comparison
+                    if cutoff_date.tzinfo is None:
+                        cutoff_date = cutoff_date.replace(tzinfo=timezone.utc)
+                    
                     if item_date >= cutoff_date:
                         cleaned_data.append(item)
                     else:
                         removed_count += 1
+                        print(f"🧹 Removing old record: {item.get('product_ref', 'unknown')} from {item_date}")
                 else:
                     # Keep items without date (shouldn't happen, but just in case)
                     cleaned_data.append(item)
             except Exception as e:
-                # If date parsing fails, keep the item
+                # If date parsing fails, keep the item but log the error
                 print(f"⚠️ Error parsing date for item: {item.get('product_ref', 'unknown')}, error: {e}")
                 cleaned_data.append(item)
         
         # Save cleaned data
         if save_scraped_data_to_s3(cleaned_data):
-            return f"Removed {removed_count} old records, kept {len(cleaned_data)} recent records"
+            return f"Removed {removed_count} old records, kept {len(cleaned_data)} recent records (from {initial_count} total)"
         else:
             return f"Failed to save cleaned data after removing {removed_count} records"
             
@@ -2866,7 +2936,7 @@ def clean_up_scraped_data_7days(cutoff_date):
         return f"Error cleaning scraped data: {str(e)}"
 
 def clean_up_forwarded_messages_7days(cutoff_date):
-    """Remove forwarded messages history older than 7 days"""
+    """Remove forwarded messages history older than 7 days with proper date handling"""
     try:
         # Load current forwarded messages data
         all_forwarded_data = load_json_from_s3(f"data/{FORWARDED_FILE}")
@@ -2876,6 +2946,10 @@ def clean_up_forwarded_messages_7days(cutoff_date):
         initial_total_messages = sum(len(messages) for messages in all_forwarded_data.values())
         removed_total = 0
         channels_affected = 0
+        
+        # Make sure cutoff_date is timezone-aware for comparison
+        if cutoff_date.tzinfo is None:
+            cutoff_date = cutoff_date.replace(tzinfo=timezone.utc)
         
         # Clean each channel's forwarded messages
         for channel_username, channel_messages in all_forwarded_data.items():
@@ -2887,25 +2961,28 @@ def clean_up_forwarded_messages_7days(cutoff_date):
             
             for message_id_str, message_date_str in channel_messages.items():
                 try:
-                    message_date = datetime.strptime(message_date_str, "%Y-%m-%d %H:%M:%S")
+                    # Parse the date string to a timezone-aware datetime
+                    message_date = datetime.strptime(message_date_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+                    
                     if message_date >= cutoff_date:
                         cleaned_messages[message_id_str] = message_date_str
                     else:
                         removed_total += 1
+                        print(f"🧹 Removing old forwarded message: {message_id_str} from {channel_username} dated {message_date}")
                 except Exception as e:
-                    # If date parsing fails, keep the message
+                    # If date parsing fails, keep the message but log the error
                     print(f"⚠️ Error parsing date for message {message_id_str} in {channel_username}, error: {e}")
                     cleaned_messages[message_id_str] = message_date_str
             
-            # Update channel data
-            all_forwarded_data[channel_username] = cleaned_messages
-            if len(cleaned_messages) < initial_channel_count:
+            # Update channel data only if changes were made
+            if len(cleaned_messages) != initial_channel_count:
+                all_forwarded_data[channel_username] = cleaned_messages
                 channels_affected += 1
         
         # Save cleaned forwarded messages data
         if save_json_to_s3(all_forwarded_data, f"data/{FORWARDED_FILE}"):
             final_total_messages = sum(len(messages) for messages in all_forwarded_data.values())
-            return f"Removed {removed_total} old messages from {channels_affected} channels, kept {final_total_messages} recent messages"
+            return f"Removed {removed_total} old messages from {channels_affected} channels, kept {final_total_messages} recent messages (from {initial_total_messages} total)"
         else:
             return f"Failed to save cleaned forwarded messages data after removing {removed_total} messages"
             
