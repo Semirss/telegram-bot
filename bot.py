@@ -70,22 +70,16 @@ SCRAPED_DATA_FILE = "scraped_data.json"
 
 # === 🤖 AI Enhancement with Hugging Face API ===
 HF_API_TOKEN = os.getenv("HF_API_TOKEN")
-HF_API_URL = "https://router.huggingface.co"
+HF_API_URL = "https://api-inference.huggingface.co/models"
 
 def query_huggingface_api(payload, model_name, max_retries=3):
-    """Generic function to query Hugging Face API with new router endpoint"""
+    """Generic function to query Hugging Face API"""
     headers = {"Authorization": f"Bearer {HF_API_TOKEN}"}
     API_URL = f"{HF_API_URL}/{model_name}"
     
     for attempt in range(max_retries):
         try:
-            # For the new router endpoint, we need to send a slightly different request
-            router_payload = {
-                "inputs": payload.get("inputs"),
-                "parameters": payload.get("parameters", {})
-            }
-            
-            response = requests.post(API_URL, headers=headers, json=router_payload, timeout=30)
+            response = requests.post(API_URL, headers=headers, json=payload, timeout=30)
             
             if response.status_code == 200:
                 return response.json()
@@ -95,15 +89,6 @@ def query_huggingface_api(payload, model_name, max_retries=3):
                 print(f"⏳ Model loading, waiting {wait_time}s...")
                 time.sleep(wait_time)
                 continue
-            elif response.status_code == 422:
-                # Try with the old format for backward compatibility
-                print(f"⚠️ Trying alternative payload format for {model_name}")
-                response = requests.post(API_URL, headers=headers, json=payload, timeout=30)
-                if response.status_code == 200:
-                    return response.json()
-                else:
-                    print(f"❌ Alternative format also failed: {response.status_code}")
-                    return None
             else:
                 print(f"❌ API Error {response.status_code}: {response.text}")
                 return None
