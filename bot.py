@@ -29,6 +29,7 @@ from telegram.error import BadRequest, Conflict
 import schedule 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import CallbackQueryHandler
+from telegram.error import BadRequest, Conflict, NetworkError, TimedOut, ChatMigrated, RetryAfter
 app = Flask(__name__)
 
 @app.route("/")
@@ -344,11 +345,72 @@ auth_collection = db["authorized_users"]
 session_usage_collection = db["session_usage"]
 categories_collection = db["categories"]
 def error_handler(update, context):
-    """Handle errors including Conflict errors"""
-    if isinstance(context.error, Conflict):
-        print("❌ Conflict error detected - another bot instance might be running")
-        return
-    print(f'❌ Update "{update}" caused error "{context.error}"')
+    """Handle errors including Conflict errors and other critical errors"""
+    try:
+        error = context.error
+        
+        # Handle specific error types
+        if isinstance(error, Conflict):
+            print("❌ Conflict error detected - another bot instance might be running")
+            print("💡 Solution: Stop other bot instances or use different bot token")
+            return
+        
+        elif isinstance(error, NetworkError):
+            print(f"🌐 Network error: {error}")
+            print("💡 Bot will attempt to reconnect automatically")
+            return
+            
+        elif isinstance(error, TimedOut):
+            print(f"⏰ Timeout error: {error}")
+            print("💡 This might be due to slow network or server issues")
+            return
+            
+        elif isinstance(error, RetryAfter):
+            print(f"⚠️ Rate limited: Need to wait {error.retry_after} seconds")
+            time.sleep(error.retry_after)
+            return
+            
+        elif isinstance(error, ChatMigrated):
+            print(f"🔄 Chat migrated: {error}")
+            # Update chat ID for future messages
+            return
+            
+        elif isinstance(error, BadRequest):
+            print(f"❌ Bad request: {error}")
+            # Try to send error message to user if possible
+            if update and update.effective_chat:
+                try:
+                    context.bot.send_message(
+                        chat_id=update.effective_chat.id,
+                        text=f"⚠️ Error: {str(error)[:100]}"
+                    )
+                except:
+                    pass
+            return
+        
+        # Log the error
+        print(f'❌ Error in update "{update}":')
+        print(f'   Error Type: {type(error).__name__}')
+        print(f'   Error Message: {error}')
+        
+        # Log traceback for debugging
+        import traceback
+        traceback_str = traceback.format_exc()
+        print(f'   Traceback: {traceback_str}')
+        
+        # Try to send a generic error message to the user
+        if update and hasattr(update, 'effective_chat') and update.effective_chat:
+            try:
+                error_msg = "⚠️ An error occurred. The bot might be experiencing temporary issues."
+                context.bot.send_message(
+                    chat_id=update.effective_chat.id,
+                    text=error_msg
+                )
+            except Exception as e:
+                print(f"⚠️ Could not send error message to user: {e}")
+                
+    except Exception as e:
+        print(f"❌ Error in error handler itself: {e}")
 # === 🔄 AWS S3 File Management Functions (S3 ONLY) ===
 def file_exists_in_s3(s3_key):
     """Efficiently check if file exists in S3 using head_object (no download)"""
@@ -3665,94 +3727,203 @@ def code(update, context):
         update.message.reply_text("❌ Invalid code. Access denied.")
 
 # ======================
-# Main (S3 ONLY)
+# Main (S3 ONLY) with Robust Error Handling
 # ======================
 def main():
     # Start Flask thread
-    threading.Thread(target=run_flask, daemon=True).start()
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+    print("🌐 Flask server started in separate thread")
     
-    from telegram.utils.request import Request
-    from telegram.error import Conflict
+    max_restart_attempts = 5
+    restart_delay = 30  # seconds
+    current_attempt = 0
     
-    # ✅ FIX: Create Bot with Request instead of passing to Updater
-    request = Request(connect_timeout=30, read_timeout=30, con_pool_size=8)
-    bot = Bot(token=BOT_TOKEN, request=request)
-    
-    # ✅ FIX: Pass bot to Updater instead of token
-    updater = Updater(bot=bot, use_context=True)
-    dp = updater.dispatcher
-    
-    # Add error handler
-    dp.add_error_handler(error_handler)
-   
-    # All your existing handlers
-    dp.add_handler(CommandHandler("start", start))
-    dp.add_handler(CommandHandler("code", code))
-    dp.add_handler(CommandHandler("addchannel", add_channel))
-    dp.add_handler(CommandHandler("addmultiplechannels", add_multiple_channels))
-    dp.add_handler(CommandHandler("multipleverifiedchanneladder", multiple_verifiedchanneladder))
-    dp.add_handler(CommandHandler("verifiedchanneladder", verified_channel_adder))
-    dp.add_handler(CommandHandler("verifychannel", verify_channel))
-   
-    dp.add_handler(CommandHandler("optimizationchecker", optimization_checker))
-    dp.add_handler(CommandHandler("listchannels", list_channels))
-    dp.add_handler(CommandHandler("checkchannel", check_channel))
-    dp.add_handler(CommandHandler("deletechannel", delete_channel))
-    # dp.add_handler(CommandHandler("setup_session", setup_session))
-    dp.add_handler(CommandHandler("check_session", check_session))
-    dp.add_handler(CommandHandler("checksessionusage", check_session_usage))
-    dp.add_handler(CommandHandler("test", test_connection))
-    dp.add_handler(CommandHandler("check_data", check_scraped_data))
-    dp.add_handler(CommandHandler("check_s3", check_s3_status))
-    # dp.add_handler(CommandHandler("cleanup", cleanup_sessions))
-    # dp.add_handler(CommandHandler("clearhistory", clear_forwarded_history))
-    dp.add_handler(CommandHandler("diagnose", diagnose_session))
-    dp.add_handler(CommandHandler("debug_json", debug_s3_json))
-    dp.add_handler(CommandHandler("deletes3files", delete_s3_files))
-    dp.add_handler(CommandHandler("getscrapedjson", get_scraped_json))
-    dp.add_handler(CommandHandler("debug_json_comprehensive", debug_json_comprehensive))
-    dp.add_handler(CommandHandler("start_24h_auto_scraping", start_24h_auto_scraping))
-    dp.add_handler(CommandHandler("schedule_24h_auto_scraping", schedule_24h_auto_scraping))
-    dp.add_handler(CommandHandler("checkverification", check_verification_status))
-    dp.add_handler(CommandHandler("removeverified", remove_verified))
-    dp.add_handler(CommandHandler("removeallverified", remove_all_verified))
-    dp.add_handler(CommandHandler("verificationstatus", verification_status))
-    dp.add_handler(CommandHandler("clean_up7day", clean_up7day))
-    dp.add_handler(CallbackQueryHandler(remove_verified_callback, pattern="^remove_all_verified_"))
-    dp.add_handler(CallbackQueryHandler(verification_status_callback, pattern="^verification_"))
-    dp.add_handler(CallbackQueryHandler(verification_status_callback, pattern="^remove_verify_"))
-    dp.add_handler(CallbackQueryHandler(remove_verified_callback, pattern="^(remove_verify_|remove_verified_refresh)"))  
-    dp.add_handler(CallbackQueryHandler(verification_status_callback, pattern="^(verify_|remove_verify_|verification_stats|remove_all_verified|verification_status)"))
-    dp.add_handler(CallbackQueryHandler(remove_verified_callback, pattern="^remove_all_verified_"))
-    dp.add_handler(CallbackQueryHandler(verify_channel_callback, pattern="^verify_"))
-    dp.add_handler(MessageHandler(Filters.command, unknown_command))
+    while current_attempt < max_restart_attempts:
+        try:
+            current_attempt += 1
+            print(f"\n🚀 Bot Startup Attempt {current_attempt}/{max_restart_attempts}")
+            
+            from telegram.utils.request import Request
+            from telegram.error import Conflict, NetworkError, TimedOut, ChatMigrated, RetryAfter
+            
+            # ✅ FIX: Create Bot with Request instead of passing to Updater
+            request = Request(connect_timeout=30, read_timeout=30, con_pool_size=8)
+            bot = Bot(token=BOT_TOKEN, request=request)
+            
+            # ✅ FIX: Pass bot to Updater instead of token
+            updater = Updater(bot=bot, use_context=True)
+            dp = updater.dispatcher
+            
+            # Add error handler
+            dp.add_error_handler(error_handler)
+            
+            # All your existing handlers
+            dp.add_handler(CommandHandler("start", start))
+            dp.add_handler(CommandHandler("code", code))
+            dp.add_handler(CommandHandler("addchannel", add_channel))
+            dp.add_handler(CommandHandler("addmultiplechannels", add_multiple_channels))
+            dp.add_handler(CommandHandler("multipleverifiedchanneladder", multiple_verifiedchanneladder))
+            dp.add_handler(CommandHandler("verifiedchanneladder", verified_channel_adder))
+            dp.add_handler(CommandHandler("verifychannel", verify_channel))
+            dp.add_handler(CommandHandler("optimizationchecker", optimization_checker))
+            dp.add_handler(CommandHandler("listchannels", list_channels))
+            dp.add_handler(CommandHandler("checkchannel", check_channel))
+            dp.add_handler(CommandHandler("deletechannel", delete_channel))
+            dp.add_handler(CommandHandler("check_session", check_session))
+            dp.add_handler(CommandHandler("checksessionusage", check_session_usage))
+            dp.add_handler(CommandHandler("test", test_connection))
+            dp.add_handler(CommandHandler("check_data", check_scraped_data))
+            dp.add_handler(CommandHandler("check_s3", check_s3_status))
+            dp.add_handler(CommandHandler("diagnose", diagnose_session))
+            dp.add_handler(CommandHandler("debug_json", debug_s3_json))
+            dp.add_handler(CommandHandler("deletes3files", delete_s3_files))
+            dp.add_handler(CommandHandler("getscrapedjson", get_scraped_json))
+            dp.add_handler(CommandHandler("debug_json_comprehensive", debug_json_comprehensive))
+            dp.add_handler(CommandHandler("start_24h_auto_scraping", start_24h_auto_scraping))
+            dp.add_handler(CommandHandler("schedule_24h_auto_scraping", schedule_24h_auto_scraping))
+            dp.add_handler(CommandHandler("checkverification", check_verification_status))
+            dp.add_handler(CommandHandler("removeverified", remove_verified))
+            dp.add_handler(CommandHandler("removeallverified", remove_all_verified))
+            dp.add_handler(CommandHandler("verificationstatus", verification_status))
+            dp.add_handler(CommandHandler("clean_up7day", clean_up7day))
+            dp.add_handler(CallbackQueryHandler(remove_verified_callback, pattern="^remove_all_verified_"))
+            dp.add_handler(CallbackQueryHandler(verification_status_callback, pattern="^verification_"))
+            dp.add_handler(CallbackQueryHandler(verification_status_callback, pattern="^remove_verify_"))
+            dp.add_handler(CallbackQueryHandler(remove_verified_callback, pattern="^(remove_verify_|remove_verified_refresh)"))  
+            dp.add_handler(CallbackQueryHandler(verification_status_callback, pattern="^(verify_|remove_verify_|verification_stats|remove_all_verified|verification_status)"))
+            dp.add_handler(CallbackQueryHandler(remove_verified_callback, pattern="^remove_all_verified_"))
+            dp.add_handler(CallbackQueryHandler(verify_channel_callback, pattern="^verify_"))
+            dp.add_handler(MessageHandler(Filters.command, unknown_command))
 
-    print(f"🤖 Bot is running...")
-    print(f"🔧 Using session file: {USER_SESSION_FILE}")
-    print(f"🌍 Environment: {'render' if 'RENDER' in os.environ else 'local'}")
-    print(f"☁️ S3 Bucket: {AWS_BUCKET_NAME}")
+            print(f"🤖 Bot is starting...")
+            print(f"🔧 Using session file: {USER_SESSION_FILE}")
+            print(f"🌍 Environment: {'🚀 Render' if 'RENDER' in os.environ else '💻 Local'}")
+            print(f"☁️ S3 Bucket: {AWS_BUCKET_NAME}")
+            
+            # Efficiently check all S3 files on startup
+            print("\n🔍 Checking S3 files efficiently (using head_object)...")
+            try:
+                s3_status = check_s3_files_status()
+                print("✅ S3 check completed")
+            except Exception as e:
+                print(f"⚠️ S3 check failed (non-critical): {e}")
+            
+            # Ensure S3 structure exists
+            try:
+                ensure_s3_structure()
+                print("✅ S3 structure verified")
+            except Exception as e:
+                print(f"⚠️ S3 structure check failed (non-critical): {e}")
+            
+            # Test critical connections
+            try:
+                print("\n🔌 Testing critical connections...")
+                # Test MongoDB
+                client.admin.command('ping')
+                print("✅ MongoDB connection: OK")
+                
+                # Test S3
+                s3.head_bucket(Bucket=AWS_BUCKET_NAME)
+                print("✅ AWS S3 connection: OK")
+                
+                # Test Telegram Bot API
+                bot_info = bot.get_me()
+                print(f"✅ Telegram Bot API: OK (Bot: @{bot_info.username})")
+                
+            except Exception as e:
+                print(f"⚠️ Connection test failed: {e}")
+                print("⚠️ Continuing anyway, some features may not work...")
+            
+            print("\n" + "="*50)
+            print("✅ All systems ready! Bot is now active.")
+            print("="*50 + "\n")
+            
+            # Enhanced error handling for polling
+            def safe_polling():
+                try:
+                    updater.start_polling(
+                        timeout=20,
+                        poll_interval=2,
+                        drop_pending_updates=True,
+                        allowed_updates=['message', 'callback_query']
+                    )
+                    updater.idle()
+                except KeyboardInterrupt:
+                    print("\n🛑 Shutdown requested by user...")
+                    raise
+                except Conflict as e:
+                    print(f"❌ Conflict error: Another instance might be running. {e}")
+                    raise
+                except (NetworkError, TimedOut) as e:
+                    print(f"⚠️ Network error: {e}")
+                    print("🔄 Attempting to reconnect...")
+                    time.sleep(10)
+                    # Try to restart polling
+                    return safe_polling()
+                except RetryAfter as e:
+                    print(f"⚠️ Rate limited: {e}")
+                    time.sleep(e.retry_after)
+                    return safe_polling()
+                except ChatMigrated as e:
+                    print(f"⚠️ Chat migrated: {e}")
+                    # Continue operation
+                    return safe_polling()
+                except Exception as e:
+                    print(f"❌ Critical polling error: {type(e).__name__}: {e}")
+                    print("🔄 Attempting to restart polling...")
+                    time.sleep(15)
+                    return safe_polling()
+            
+            # Start polling with enhanced error handling
+            safe_polling()
+            
+            # If we get here, polling stopped normally
+            print("👋 Bot stopped normally")
+            break
+            
+        except KeyboardInterrupt:
+            print("\n🛑 Bot shutdown requested by user")
+            break
+            
+        except Conflict as e:
+            print(f"❌ Fatal Conflict error: {e}")
+            print("💡 Another bot instance might be running. Please check.")
+            break
+            
+        except Exception as e:
+            print(f"❌ Critical startup error (Attempt {current_attempt}/{max_restart_attempts}):")
+            print(f"   Error Type: {type(e).__name__}")
+            print(f"   Error Message: {e}")
+            
+            # Log full traceback for debugging
+            import traceback
+            traceback.print_exc()
+            
+            if current_attempt < max_restart_attempts:
+                print(f"\n🔄 Attempting restart in {restart_delay} seconds...")
+                time.sleep(restart_delay)
+                # Increase delay for next attempt
+                restart_delay *= 2
+            else:
+                print(f"\n❌ Maximum restart attempts ({max_restart_attempts}) reached.")
+                print("💡 Please check the following:")
+                print("   1. Internet connection")
+                print("   2. Telegram Bot Token validity")
+                print("   3. AWS S3 credentials")
+                print("   4. MongoDB connection")
+                print("   5. No other bot instances running")
+                break
     
-    # Efficiently check all S3 files on startup
-    print("\n🔍 Checking S3 files efficiently (using head_object)...")
-    s3_status = check_s3_files_status()
-    
-    # Ensure S3 structure exists
-    ensure_s3_structure()
-    
+    # Cleanup on exit
+    print("\n🧹 Performing cleanup...")
     try:
-        # ✅ FIX: Use improved start_polling with parameters
-        updater.start_polling(
-            timeout=10,
-            drop_pending_updates=True,
-            allowed_updates=['message', 'callback_query']
-        )
-        print("✅ Bot started successfully!")
-        updater.idle()
-    except KeyboardInterrupt:
-        print("\n🛑 Shutting down bot...")
-    except Exception as e:
-        print(f"❌ Bot error: {e}")
-    finally:
-        print("👋 Bot stopped")
+        # Clean up any temporary session files
+        cleanup_telethon_sessions()
+        print("✅ Session files cleaned up")
+    except:
+        print("⚠️ Could not clean up session files")
+    
+    print("👋 Bot process ended")
 if __name__ == "__main__":
     main()
