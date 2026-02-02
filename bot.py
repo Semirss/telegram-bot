@@ -3683,8 +3683,8 @@ def start(update, context):
             "┣ /removeallverified \- Remove all verified status\n\n"
             
             "🔍 *Troubleshooting:*\n"
-            "┣ /diagnose \- Diagnose session health\n"
-            "┣ /debug_json_comprehensive \- Detailed JSON debug\n",
+            "┣ /diagnose \\- Diagnose session health\n"
+            "┣ /debug_json_comprehensive \\- Detailed JSON debug\n",
         )
     else:
         update.message.reply_text(
@@ -3833,12 +3833,30 @@ def main():
                         drop_pending_updates=True,
                         allowed_updates=['message', 'callback_query']
                     )
-                    updater.idle()
+                    
+                    # ✅ FIX: Keep bot running infinitely on Render
+                    # updater.idle() doesn't work properly in containerized environments
+                    # Use a threading Event to block forever instead
+                    print("✅ Bot is now polling and will run indefinitely...")
+                    print("💡 Press Ctrl+C to stop the bot")
+                    
+                    # Create a threading event that will never be set
+                    # This keeps the main thread alive without consuming CPU
+                    from threading import Event
+                    stop_event = Event()
+                    
+                    # This will block forever unless interrupted
+                    while True:
+                        stop_event.wait(timeout=3600)  # Wait for 1 hour intervals
+                        # This loop ensures the bot stays alive indefinitely
+                        
                 except KeyboardInterrupt:
                     print("\n🛑 Shutdown requested by user...")
+                    updater.stop()
                     raise
                 except Conflict as e:
                     print(f"❌ Conflict error: Another instance might be running. {e}")
+                    updater.stop()
                     raise
                 except (NetworkError, TimedOut) as e:
                     print(f"⚠️ Network error: {e}")
