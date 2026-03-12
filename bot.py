@@ -301,7 +301,6 @@ def enrich_product_with_ai(title, desc):
         summary = text[:80] + "..." if len(text) > 80 else text
 
     return category, summary
-    return category, summary
 
 # === 📸 GitHub Image Upload ===
 def upload_image_to_github(image_bytes, filename):
@@ -311,7 +310,7 @@ def upload_image_to_github(image_bytes, filename):
         print("⚠️ GITHUB_TOKEN or GITHUB_REPO not set in .env")
         return None
         
-    url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/images/{filename}"
+    url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/yetal-public-images/{filename}"
     headers = {
         "Authorization": f"Bearer {GITHUB_TOKEN}",
         "Accept": "application/vnd.github.v3+json"
@@ -325,7 +324,7 @@ def upload_image_to_github(image_bytes, filename):
         response = requests.put(url, headers=headers, json=data, timeout=30)
         if response.status_code in [200, 201]:
             # Construct the raw URL
-            raw_url = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/images/{filename}"
+            raw_url = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/yetal-public-images/{filename}"
             print(f"✅ Image uploaded to GitHub: {raw_url}")
             return raw_url
         else:
