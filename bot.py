@@ -304,7 +304,13 @@ def enrich_product_with_ai(title, desc):
 
 # === 📸 GitHub Image Upload ===
 def upload_image_to_github(image_bytes, filename):
-    """Uploads an image as bytes to a public GitHub repository using the GitHub API."""
+    """Uploads an image as bytes to a public GitHub repository using the GitHub API.
+    
+    Returns:
+        str: The raw URL of the uploaded image.
+        'RATE_LIMITED': If the GitHub API rate limit was hit (HTTP 403/429).
+        None: On other errors.
+    """
     import base64
     if not GITHUB_TOKEN or not GITHUB_REPO:
         print("⚠️ GITHUB_TOKEN or GITHUB_REPO not set in .env")
@@ -323,16 +329,63 @@ def upload_image_to_github(image_bytes, filename):
     try:
         response = requests.put(url, headers=headers, json=data, timeout=30)
         if response.status_code in [200, 201]:
-            # Construct the raw URL
             raw_url = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/yetal-public-images/{filename}"
             print(f"✅ Image uploaded to GitHub: {raw_url}")
             return raw_url
+        elif response.status_code in [403, 429]:
+            # Rate limit hit
+            print(f"🛑 GitHub API rate limit hit! Status: {response.status_code}")
+            return "RATE_LIMITED"
         else:
             print(f"❌ Failed to upload to GitHub: {response.status_code} - {response.text}")
             return None
     except Exception as e:
         print(f"❌ Exception uploading to GitHub: {e}")
         return None
+
+def delete_images_from_github(image_urls, max_deletions=50):
+    """Deletes old images from the GitHub repository to free up space. Stops at max_deletions to prevent API limits."""
+    if not GITHUB_TOKEN or not GITHUB_REPO:
+        return 0
+
+    import requests
+    deleted_count = 0
+    for url in image_urls:
+        if deleted_count >= max_deletions:
+            print(f"⚠️ Reached deletion limit of {max_deletions} per batch.")
+            break
+
+        try:
+            # Extract filename from raw.githubusercontent.com/... URL
+            if f"/{GITHUB_REPO}/main/yetal-public-images/" not in url:
+                continue
+            
+            filename = url.split(f"/{GITHUB_REPO}/main/yetal-public-images/")[-1]
+            
+            # 1. We must get the file's SHA to delete it in GitHub API
+            api_url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/yetal-public-images/{filename}"
+            headers = {
+                "Authorization": f"Bearer {GITHUB_TOKEN}",
+                "Accept": "application/vnd.github.v3+json"
+            }
+            
+            get_resp = requests.get(api_url, headers=headers, timeout=10)
+            if get_resp.status_code == 200:
+                sha = get_resp.json().get('sha')
+                
+                # 2. Delete the file
+                del_data = {"message": f"Cleanup image {filename}", "sha": sha}
+                del_resp = requests.delete(api_url, headers=headers, json=del_data, timeout=10)
+                
+                if del_resp.status_code == 200:
+                    print(f"🗑️ Deleted image from GitHub: {filename}")
+                    deleted_count += 1
+                else:
+                    print(f"⚠️ Failed to delete image: {del_resp.status_code}")
+        except Exception as e:
+            print(f"⚠️ Exception deleting image {url}: {e}")
+            
+    return deleted_count
 
 # === 🔧 Environment Detection ===
 def get_session_filename():
@@ -1569,21 +1622,61 @@ async def scrape_channel_7days_async(channel_username: str):
 
             product_ref = str(target_message.id)  # Use actual target message ID
 
-            # Handle Image Upload to GitHub
+            # Handle Image Upload to GitHub (Up to 4 images for albums)
             images_list = []
             if target_message.media:
-                try:
-                    print(f"📸 Downloading media for {target_message.id} to memory...")
-                    media_bytes = await telethon_client.download_media(target_message, file=bytes)
-                    if media_bytes:
-                        # Determine extension, telethon returns bytes so we default to jpg if unknown
-                        # Note: we might need to handle video differently, but for images .jpg is safe
-                        filename = f"{channel_username.replace('@', '')}_{target_message.id}.jpg"
-                        github_url = upload_image_to_github(media_bytes, filename)
-                        if github_url:
-                            images_list.append(github_url)
-                except Exception as e:
-                    print(f"⚠️ Error downloading/uploading media: {e}")
+                media_to_download = [target_message]
+                
+                # Check for album
+                if getattr(target_message, "grouped_id", None):
+                    try:
+                        print(f"📸 Album detected for {target_message.id}, fetching group...")
+                        # Get messages in the same album
+                        album_messages = await telethon_client.get_messages(
+                            target_entity, 
+                            limit=10, # Fetch a small radius
+                            min_id=target_message.id - 10,
+                            max_id=target_message.id + 10
+                        )
+                        # Filter to same group and only those with media
+                        album = [m for m in album_messages if getattr(m, "grouped_id", None) == target_message.grouped_id and m.media]
+                        # Sort by ID to maintain order
+                        album.sort(key=lambda x: x.id)
+                        
+                        if album:
+                            media_to_download = album[:4] # Enforce max 4 images limit
+                            
+                            # Mark these as used so we don't process the same album multiple times
+                            for m in album:
+                                used_target_ids.add(m.id)
+                    except Exception as e:
+                        print(f"⚠️ Error fetching album group: {e}")
+                
+                # Download and upload
+                rate_limited = False
+                for i, msg_with_media in enumerate(media_to_download):
+                    try:
+                        print(f"📸 Downloading media {i+1}/{len(media_to_download)} for {target_message.id}...")
+                        media_bytes = await telethon_client.download_media(msg_with_media, file=bytes)
+                        if media_bytes:
+                            filename = f"{channel_username.replace('@', '')}_{msg_with_media.id}.jpg"
+                            github_url = upload_image_to_github(media_bytes, filename)
+                            if github_url == "RATE_LIMITED":
+                                rate_limited = True
+                                break  # Stop uploading images for this batch
+                            elif github_url:
+                                images_list.append(github_url)
+                    except Exception as e:
+                        print(f"⚠️ Error downloading/uploading media {i+1}: {e}")
+
+                if rate_limited:
+                    # Notify the user and stop scraping further images
+                    return False, (
+                        "🛑 <b>GitHub API rate limit hit!</b>\n\n"
+                        "Image uploads have been paused. The product data has been saved, "
+                        "but image upload was stopped.\n\n"
+                        "⏰ <b>Please try scraping again in 1 hour</b> to continue uploading images."
+                    )
 
             # Create data structure
             post_data = {
@@ -2614,19 +2707,65 @@ def start_24h_auto_scraping(update, context):
                             
                             product_ref = str(target_message.id)  # Use actual target message ID
 
-                            # Handle Image Upload to GitHub
+                            # Handle Image Upload to GitHub (Up to 4 images for albums)
                             images_list = []
                             if target_message.media:
-                                try:
-                                    print(f"📸 [Auto] Downloading media for {target_message.id} to memory...")
-                                    media_bytes = await telethon_client.download_media(target_message, file=bytes)
-                                    if media_bytes:
-                                        filename = f"{matching_source['source_channel'].replace('@', '')}_{target_message.id}.jpg"
-                                        github_url = upload_image_to_github(media_bytes, filename)
-                                        if github_url:
-                                            images_list.append(github_url)
-                                except Exception as e:
-                                    print(f"⚠️ [Auto] Error downloading/uploading media: {e}")
+                                media_to_download = [target_message]
+                                
+                                # Check for album
+                                if getattr(target_message, "grouped_id", None):
+                                    try:
+                                        print(f"📸 [Auto] Album detected for {target_message.id}, fetching group...")
+                                        album_messages = await telethon_client.get_messages(
+                                            target_entity, 
+                                            limit=10,
+                                            min_id=target_message.id - 10,
+                                            max_id=target_message.id + 10
+                                        )
+                                        album = [m for m in album_messages if getattr(m, "grouped_id", None) == target_message.grouped_id and m.media]
+                                        album.sort(key=lambda x: x.id)
+                                        
+                                        if album:
+                                            media_to_download = album[:4] # Up to 4 images max
+                                            
+                                            # Mark as used
+                                            for m in album:
+                                                used_target_ids.add(m.id)
+                                    except Exception as e:
+                                        print(f"⚠️ [Auto] Error fetching album group: {e}")
+                                
+                                # Download and upload
+                                rate_limited_auto = False
+                                for i, msg_with_media in enumerate(media_to_download):
+                                    try:
+                                        print(f"📸 [Auto] Downloading media {i+1}/{len(media_to_download)} for {target_message.id}...")
+                                        media_bytes = await telethon_client.download_media(msg_with_media, file=bytes)
+                                        if media_bytes:
+                                            filename = f"{matching_source['source_channel'].replace('@', '')}_{msg_with_media.id}.jpg"
+                                            github_url = upload_image_to_github(media_bytes, filename)
+                                            if github_url == "RATE_LIMITED":
+                                                rate_limited_auto = True
+                                                break
+                                            elif github_url:
+                                                images_list.append(github_url)
+                                    except Exception as e:
+                                        print(f"⚠️ [Auto] Error downloading/uploading media {i+1}: {e}")
+
+                                if rate_limited_auto:
+                                    # Save what we have so far and stop further image scraping
+                                    print("🛑 [Auto] GitHub rate limit hit, stopping image uploads for this session.")
+                                    # Save what's collected so far, then break out of the target loop
+                                    if scraped_data:
+                                        existing_data = load_scraped_data_from_s3()
+                                        save_scraped_data_to_s3(existing_data + scraped_data)
+                                        scraped_data = []
+                                    update.message.reply_text(
+                                        "🛑 <b>GitHub API rate limit hit during auto-scrape!</b>\n\n"
+                                        "Image uploads have been paused. Scraped data (without images) continues being saved.\n\n"
+                                        "⏰ <b>Please try again in 1 hour</b> to resume uploads.",
+                                        parse_mode="HTML"
+                                    )
+                                    break  # Break out of target message loop
 
                             # Use the verification status from the source message
                             is_verified = matching_source.get('is_verified', False)
@@ -2879,11 +3018,28 @@ def remove_verified_process(update, context, username):
         scraped_data = load_scraped_data_from_s3()
         if scraped_data:
             initial_count = len(scraped_data)
-            scraped_data = [item for item in scraped_data if item.get('channel') != username]
+            
+            images_to_delete = []
+            new_scraped_data = []
+            for item in scraped_data:
+                if item.get('channel') == username:
+                    if 'images' in item and isinstance(item['images'], list):
+                        images_to_delete.extend(item['images'])
+                else:
+                    new_scraped_data.append(item)
+                    
+            scraped_data = new_scraped_data
             removed_count = initial_count - len(scraped_data)
+            
             if removed_count > 0:
                 save_scraped_data_to_s3(scraped_data)
                 message_method(chat_id, f"✅ Removed {removed_count} records of {username} from scraped data")
+                
+                # Safe GitHub Deletion
+                if images_to_delete:
+                    message_method(chat_id, f"🗑️ Deleting {len(images_to_delete)} images from GitHub (may take a moment)...")
+                    deleted_imgs = delete_images_from_github(images_to_delete, max_deletions=50)
+                    message_method(chat_id, f"✅ Deleted {deleted_imgs} images from GitHub.")
         
         # Step 2: Update channel verification status
         message_method(chat_id, f"🔄 Step 2: Removing verified status from {username}...")
@@ -3012,58 +3168,100 @@ def clean_up7day(update, context):
     threading.Thread(target=run_cleanup, daemon=True).start()
 
 def clean_up_scraped_data_7days(cutoff_date):
-    """Remove scraped data older than 7 days with proper date handling"""
+    """Remove scraped data older than 7 days.
+
+    Only removes a DB record AFTER its GitHub images are deleted.
+    If the 100-image batch limit is hit, remaining old records stay in the DB
+    so the NEXT 7-day cleanup will find them and retry. This ensures nothing
+    is ever orphaned on GitHub.
+    """
     try:
-        # Load current scraped data
         scraped_data = load_scraped_data_from_s3()
         if not scraped_data:
             return "No scraped data found to clean"
-        
+
         initial_count = len(scraped_data)
-        
-        # Filter out records older than 7 days
-        cleaned_data = []
-        removed_count = 0
-        
+        MAX_BATCH = 100
+
+        # Ensure cutoff_date is timezone-aware
+        if cutoff_date.tzinfo is None:
+            cutoff_date = cutoff_date.replace(tzinfo=timezone.utc)
+
+        # Split into recent (always keep) and old (candidates)
+        recent_items = []
+        old_items = []
+
         for item in scraped_data:
             try:
-                # Parse the date from the item
                 if 'date' in item and item['date']:
-                    # Parse the date string to a timezone-aware datetime
                     item_date_str = item['date']
-                    # Handle different date formats
                     if 'T' in item_date_str:
-                        # ISO format with T
                         item_date = datetime.fromisoformat(item_date_str.replace('Z', '+00:00'))
                     else:
-                        # Standard format without T
                         item_date = datetime.strptime(item_date_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
-                    
-                    # Make sure cutoff_date is timezone-aware for comparison
-                    if cutoff_date.tzinfo is None:
-                        cutoff_date = cutoff_date.replace(tzinfo=timezone.utc)
-                    
+
                     if item_date >= cutoff_date:
-                        cleaned_data.append(item)
+                        recent_items.append(item)
                     else:
-                        removed_count += 1
-                        print(f"🧹 Removing old record: {item.get('product_ref', 'unknown')} from {item_date}")
+                        old_items.append(item)
+                        print(f"🧹 Candidate for removal: {item.get('product_ref', 'unknown')} dated {item_date}")
                 else:
-                    # Keep items without date (shouldn't happen, but just in case)
-                    cleaned_data.append(item)
+                    recent_items.append(item)  # no date = keep
             except Exception as e:
-                # If date parsing fails, keep the item but log the error
-                print(f"⚠️ Error parsing date for item: {item.get('product_ref', 'unknown')}, error: {e}")
-                cleaned_data.append(item)
-        
-        # Save cleaned data
-        if save_scraped_data_to_s3(cleaned_data):
-            return f"Removed {removed_count} old records, kept {len(cleaned_data)} recent records (from {initial_count} total)"
+                print(f"⚠️ Date parse error for '{item.get('product_ref', 'unknown')}': {e}")
+                recent_items.append(item)  # parse error = keep
+
+        if not old_items:
+            return f"No old records to clean (all {initial_count} records are within 7 days)"
+
+        # Process old items: only drop from DB after GitHub images are deleted
+        deleted_total = 0
+        actually_removed_count = 0
+        items_kept_for_next_cycle = []
+
+        for item in old_items:
+            item_images = [url for url in item.get('images', []) if url]
+
+            if not item_images:
+                # No images to delete – safe to drop from DB immediately
+                actually_removed_count += 1
+                print(f"🗑️ No images, removing from DB: {item.get('product_ref', 'unknown')}")
+                continue
+
+            if deleted_total >= MAX_BATCH:
+                # Out of budget – keep in DB for next cleanup cycle
+                items_kept_for_next_cycle.append(item)
+                print(f"⚠️ Batch limit reached, deferring: {item.get('product_ref', 'unknown')}")
+                continue
+
+            budget = MAX_BATCH - deleted_total
+            deleted = delete_images_from_github(item_images, max_deletions=budget)
+            deleted_total += deleted
+
+            if deleted >= len(item_images):
+                # All images deleted – safe to drop from DB
+                actually_removed_count += 1
+                print(f"🗑️ All {deleted} images deleted, removing from DB: {item.get('product_ref', 'unknown')}")
+            else:
+                # Partial only (hit limit mid-item) – keep in DB for retry
+                items_kept_for_next_cycle.append(item)
+                print(f"⚠️ Only {deleted}/{len(item_images)} images deleted, deferring: {item.get('product_ref', 'unknown')}")
+
+        # Save: recent items + any old items that couldn't be fully cleaned yet
+        final_data = recent_items + items_kept_for_next_cycle
+
+        if save_scraped_data_to_s3(final_data):
+            msg = (f"Removed {actually_removed_count} old records, kept {len(final_data)} records "
+                   f"(from {initial_count} total) | Deleted {deleted_total} GitHub images")
+            if items_kept_for_next_cycle:
+                msg += f" | ⚠️ {len(items_kept_for_next_cycle)} records deferred to next cleanup (batch limit)"
+            return msg
         else:
-            return f"Failed to save cleaned data after removing {removed_count} records"
-            
+            return "Failed to save cleaned data"
+
     except Exception as e:
         return f"Error cleaning scraped data: {str(e)}"
+
 
 def clean_up_forwarded_messages_7days(cutoff_date):
     """Remove forwarded messages history older than 7 days with proper date handling"""
