@@ -55,7 +55,9 @@ AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID")
 AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
 AWS_BUCKET_NAME = os.getenv("AWS_BUCKET_NAME", "your-telegram-bot-bucket")
 
-
+# === 🔐 GitHub Configuration ===
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
+GITHUB_REPO = os.getenv("GITHUB_REPO")  # e.g., "username/repo"
 
 # Initialize S3 client
 s3 = boto3.client(
@@ -299,6 +301,40 @@ def enrich_product_with_ai(title, desc):
         summary = text[:80] + "..." if len(text) > 80 else text
 
     return category, summary
+    return category, summary
+
+# === 📸 GitHub Image Upload ===
+def upload_image_to_github(image_bytes, filename):
+    """Uploads an image as bytes to a public GitHub repository using the GitHub API."""
+    import base64
+    if not GITHUB_TOKEN or not GITHUB_REPO:
+        print("⚠️ GITHUB_TOKEN or GITHUB_REPO not set in .env")
+        return None
+        
+    url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/images/{filename}"
+    headers = {
+        "Authorization": f"Bearer {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github.v3+json"
+    }
+    
+    encoded_content = base64.b64encode(image_bytes).decode("utf-8")
+    
+    data = {"message": f"Upload image {filename}", "content": encoded_content}
+    
+    try:
+        response = requests.put(url, headers=headers, json=data, timeout=30)
+        if response.status_code in [200, 201]:
+            # Construct the raw URL
+            raw_url = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/images/{filename}"
+            print(f"✅ Image uploaded to GitHub: {raw_url}")
+            return raw_url
+        else:
+            print(f"❌ Failed to upload to GitHub: {response.status_code} - {response.text}")
+            return None
+    except Exception as e:
+        print(f"❌ Exception uploading to GitHub: {e}")
+        return None
+
 # === 🔧 Environment Detection ===
 def get_session_filename():
     """Get unique session filename for each environment"""
@@ -1534,6 +1570,22 @@ async def scrape_channel_7days_async(channel_username: str):
 
             product_ref = str(target_message.id)  # Use actual target message ID
 
+            # Handle Image Upload to GitHub
+            images_list = []
+            if target_message.media:
+                try:
+                    print(f"📸 Downloading media for {target_message.id} to memory...")
+                    media_bytes = await telethon_client.download_media(target_message, file=bytes)
+                    if media_bytes:
+                        # Determine extension, telethon returns bytes so we default to jpg if unknown
+                        # Note: we might need to handle video differently, but for images .jpg is safe
+                        filename = f"{channel_username.replace('@', '')}_{target_message.id}.jpg"
+                        github_url = upload_image_to_github(media_bytes, filename)
+                        if github_url:
+                            images_list.append(github_url)
+                except Exception as e:
+                    print(f"⚠️ Error downloading/uploading media: {e}")
+
             # Create data structure
             post_data = {
                 "title": info["title"],
@@ -1550,6 +1602,7 @@ async def scrape_channel_7days_async(channel_username: str):
                 "generated_description": generated_description,
                 "ai_enhanced": True,
                 "has_media": bool(target_message.media),
+                "images": images_list,        # Array of image URLs hosted on GitHub
                 "has_text": bool(target_message.text),
                 "source_message_id": matching_source['source_message_id'],  # Original source ID
                 "target_message_id": target_message.id,   # Actual target channel ID
@@ -2560,6 +2613,22 @@ def start_24h_auto_scraping(update, context):
                                     internal_id = internal_id[4:]
                                 post_link = f"https://t.me/c/{internal_id}/{target_message.id}"
                             
+                            product_ref = str(target_message.id)  # Use actual target message ID
+
+                            # Handle Image Upload to GitHub
+                            images_list = []
+                            if target_message.media:
+                                try:
+                                    print(f"📸 [Auto] Downloading media for {target_message.id} to memory...")
+                                    media_bytes = await telethon_client.download_media(target_message, file=bytes)
+                                    if media_bytes:
+                                        filename = f"{matching_source['source_channel'].replace('@', '')}_{target_message.id}.jpg"
+                                        github_url = upload_image_to_github(media_bytes, filename)
+                                        if github_url:
+                                            images_list.append(github_url)
+                                except Exception as e:
+                                    print(f"⚠️ [Auto] Error downloading/uploading media: {e}")
+
                             # Use the verification status from the source message
                             is_verified = matching_source.get('is_verified', False)
                             
